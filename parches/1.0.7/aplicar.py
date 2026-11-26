@@ -6,7 +6,7 @@ def replace(file,a,b):
     s=p.read_text()
     assert s.count(a)==1, (file,a)
     p.write_text(s.replace(a,b))
-replace("android/app/build.gradle.kts",'versionCode = 150; versionName = "1.0.6"','versionCode = 152; versionName = "1.0.8"')
+replace("android/app/build.gradle.kts",'versionCode = 150; versionName = "1.0.6"','versionCode = 153; versionName = "1.0.9"')
 replace("engine-mallabi/adapter.js","integraRotondas,planificaOSRM};","integraRotondas,planificaOSRM,fetchAlternatives};")
 replace("engine-mallabi/tests/integration.test.cjs","app.indexOf('function drawingContext(')","app.indexOf('async function replan(')")
 replace("scripts/construye.cjs","appMallabi.indexOf('function drawingContext(')","appMallabi.indexOf('async function replan(')")
@@ -20,7 +20,7 @@ ui="""<div id="creadorModo"><button type="button" id="modoManual" aria-pressed="
 replace("src/nuevo.plantilla.html",'<div id="mapRot"></div><div class="tools">','<div id="mapRot"></div>'+ui+'<div class="tools">')
 shutil.copyfile("parches/1.0.7/11-alternativas.js",root/"src/js/11-alternativas.js")
 p=root/"instalar.html"
-p.write_text(p.read_text().replace("MallabiGPS 1.0.6 — versión candidata","MallabiGPS 1.0.8 — versión candidata"))
+p.write_text(p.read_text().replace("MallabiGPS 1.0.6 — versión candidata","MallabiGPS 1.0.9 — versión candidata"))
 
 # Integrar selector y panel en un unico bloque inferior, sin tapar el centro.
 p=root/"src/nuevo.plantilla.html"
@@ -38,3 +38,58 @@ s=p.read_text()
 previewcss="""#alternativasPanel{max-height:none;overflow:visible;min-height:0}#creadorDock{box-sizing:border-box}#alternativasLista.compact-preview{display:flex;flex-wrap:wrap;gap:5px}#alternativasLista.compact-preview .alternativa{flex:1;min-width:0;text-align:center;border:1px solid #41616e;border-top:4px solid;border-top-color:var(--alt-color,#75dce0);padding:5px 2px;gap:2px;font-size:12px}#alternativasLista.compact-preview .alternativa:nth-child(1){border-top-color:#38bdf8}#alternativasLista.compact-preview .alternativa:nth-child(2){border-top-color:#ffad4a}#alternativasLista.compact-preview .alternativa:nth-child(3){border-top-color:#a3e66c}#alternativasLista.compact-preview .alternativa[aria-pressed=true]{background:#28505c;box-shadow:inset 0 0 0 1px #a9e5e8}#alternativasLista.compact-preview .alternativa small{font-size:11px}#alternativasLista .alternativaConfirmar{flex:0 0 100%;min-height:44px;background:#75dce0;color:#102632;font-weight:700;border-radius:9px}#creadorDock:has(.compact-preview) #creadorModo,#alternativasPanel:has(.compact-preview) header,#alternativasPanel:has(.compact-preview) label{display:none}"""
 s=s.replace("</style></head><body>",previewcss+"</style></head><body>",1)
 p.write_text(s)
+
+# 1.0.9: actividad compartida entre ambos modos. El selector queda visible
+# antes de marcar puntos, también cuando se crea punto a punto.
+p=root/"src/nuevo.plantilla.html"
+s=p.read_text()
+a='<label>Actividad <select id="alternativasActividad"><option value="bike">BTT / e-bike</option><option value="foot">A pie</option><option value="car">Coche</option></select></label>'
+assert s.count(a)==1
+s=s.replace(a,'')
+s=s.replace('<div id="creadorDock"><div id="creadorModo">','<div id="creadorDock">'+a.replace('<label>Actividad','<label id="creadorActividad">Actividad').replace('A pie','Senderismo')+'<div id="creadorModo">',1)
+extra="""#creadorActividad{display:flex;align-items:center;gap:8px;font-size:13px}#creadorActividad select{flex:1}#creadorDock:has(.compact-preview) #creadorActividad{display:none}#alternativasLista.compact-preview .alternativaConfirmar{flex:2 1 0}#alternativasLista.compact-preview .alternativaCancelar{flex:1 1 0;min-height:44px;background:#183642;color:#e7f6f8;border:1px solid #41616e;border-radius:9px;font-weight:650}#alternativasLista.compact-preview .alternativa{flex:1 1 28%}"""
+s=s.replace('</style></head><body>',extra+'</style></head><body>',1)
+p.write_text(s)
+# Las alternativas de bicicleta no usan OSRM: el perfil ciclista general
+# no es una comprobación de aptitud BTT. Valhalla y BRouter sí son específicos.
+replace("engine-mallabi/assets/app.js","const primary=[attempt('Valhalla',()=>valhalla(0)),attempt('OSRM',osrm)];","const primary=[attempt('Valhalla',()=>valhalla(0))];\n  if(mode!=='bike')primary.push(attempt('OSRM',osrm));")
+replace("engine-mallabi/assets/app.js","const priority={Valhalla:0,OSRM:1,BRouter:2};","const priority=mode==='bike'?{BRouter:0,Valhalla:1,OSRM:2}:{Valhalla:0,OSRM:1,BRouter:2};")
+# El tramo guiado usa los mismos motores específicos, nunca el perfil a pie
+# ni la heurística de calzada de coche cuando se ha elegido BTT.
+p=root/"src/js/05-creador-tramos.js"
+s=p.read_text()
+a='async function solicitaMapaGps(coords,signal){'
+assert s.count(a)==1
+s=s.replace(a,a+"""
+ const actividad=typeof document!=='undefined'&&document.getElementById('alternativasActividad')?.value;
+ if(actividad==='bike'&&typeof window!=='undefined'&&window.MallabiMotor?.fetchAlternatives){
+  const parts=[];
+  try{
+   for(let i=1;i<coords.length;i++){
+    if(signal.aborted)throw Error('Cálculo cancelado');
+    const from=parts.length?parts.at(-1).at(-1):coords[i-1];
+    const opts=await window.MallabiMotor.fetchAlternatives(from,coords[i],'bike');
+    if(signal.aborted)throw Error('Cálculo cancelado');
+    const chosen=opts.find(r=>r.mode==='bike'&&['BRouter','Valhalla'].includes(r.provider)&&(!parts.length||dist(from,r.parts[0][0])<=2));
+    if(!chosen)throw Error('No se encontró un camino BTT compatible');
+    parts.push(chosen.parts[0]);
+   }
+   const result={anchors:[parts[0][0],...parts.map(p=>p.at(-1))],parts,provider:'BTT'};
+   if(!window.MallabiMotor.validaAlternativa(coords,result))throw Error('Recorrido BTT discontinuo');
+   return result;
+  }catch(e){e.calzadaDudosa=true;throw e;}
+ }
+""")
+p.write_text(s)
+# Conservar las pruebas de referencia y añadir verificaciones del producto.
+p=root/"engine-mallabi/tests/activity-109.test.cjs"
+p.write_text("""const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const root=path.resolve(__dirname,'../..');
+const app=fs.readFileSync(path.join(root,'engine-mallabi/assets/app.js'),'utf8');
+const creator=fs.readFileSync(path.join(root,'src/js/05-creador-tramos.js'),'utf8');
+const html=fs.readFileSync(path.join(root,'src/nuevo.plantilla.html'),'utf8');
+const ui=fs.readFileSync(path.join(root,'src/js/11-alternativas.js'),'utf8');
+test('BTT no solicita OSRM como alternativa',()=>assert.match(app,/if\\(mode!=='bike'\\)primary.push\\(attempt\\('OSRM'/));
+test('BTT manual usa perfil ciclista y no fallback peatonal',()=>{assert.match(creator,/fetchAlternatives\\(from,coords\\[i\\],'bike'\\)/);assert.match(creator,/e.calzadaDudosa=true;throw e/);});
+test('actividad visible en el creador único y cancelar vista previa',()=>{assert.match(html,/id="creadorDock"><label id="creadorActividad"/);assert.match(ui,/cancel.onclick=cancelaAlternativas/);});
+""")
