@@ -21,3 +21,14 @@ replace("src/nuevo.plantilla.html",'<div id="mapRot"></div><div class="tools">',
 shutil.copyfile("parches/1.0.7/11-alternativas.js",root/"src/js/11-alternativas.js")
 p=root/"instalar.html"
 p.write_text(p.read_text().replace("MallabiGPS 1.0.6 — versión candidata","MallabiGPS 1.0.7 — versión candidata"))
+
+# Integrar selector y panel en un unico bloque inferior, sin tapar el centro.
+p=root/"src/nuevo.plantilla.html"
+s=p.read_text()
+old='<div id="creadorModo">'
+assert s.count(old)==1
+s=s.replace(old,'<div id="creadorDock"><div id="creadorModo">',1)
+s=s.replace('</div></section><div class="tools">','</div></section></div><div class="tools">',1)
+dockcss="""#creadorDock{display:none}body.creating-route #creadorDock{display:flex;flex-direction:column;gap:6px;position:absolute;z-index:1002;left:10px;right:10px;bottom:calc(var(--create-profile-height,145px) + 8px);padding:7px;background:#102632f5;border:1px solid #4a7580;border-radius:16px;box-shadow:0 5px 20px #0006;color:#f1f8fa}body.creating-route #creadorDock:has(#alternativasPanel:not(.hidden)){bottom:12px}body.creating-route #creadorModo{position:static;transform:none;display:flex;gap:6px;padding:0;background:none;white-space:normal}#creadorModo button{flex:1;min-width:0;background:#162e3b;color:#d6eef2;border:1px solid #41616e;font-weight:650}#creadorModo button[aria-pressed=true]{background:#173c46;color:#8cecef;border-color:#75dce0;box-shadow:inset 0 -2px #75dce0}#alternativasPanel{position:static;max-height:32vh;padding:4px 5px 2px;border:0;border-radius:0;box-shadow:none;background:none}#alternativasPanel header{font-size:14px;margin:0 0 5px}#alternativasCerrar{min-width:44px;min-height:44px;color:#d6eef2;background:#183642;border:1px solid #41616e;border-radius:10px}#alternativasPanel label{display:flex;align-items:center;gap:8px;font-size:13px}#alternativasActividad{flex:1;min-height:44px;background:#183642;color:#e7f6f8;border:1px solid #41616e;border-radius:9px;padding:4px 8px;font:inherit;color-scheme:dark}#alternativasEstado{font-size:14px;margin:7px 0 2px;color:#bde5e8}#alternativasLista{margin-top:5px;gap:5px}.alternativa{padding:7px 10px;min-height:44px}"""
+s=s.replace("</style></head><body>",dockcss+"</style></head><body>",1)
+p.write_text(s)
