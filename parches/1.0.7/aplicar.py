@@ -61,7 +61,7 @@ s=p.read_text()
 a='async function solicitaMapaGps(coords,signal){'
 assert s.count(a)==1
 s=s.replace(a,a+"""
- const actividad=typeof document!=='undefined'&&document.getElementById('alternativasActividad')?.value;
+ const actividad=typeof document!=='undefined'&&document.getElementById?.('alternativasActividad')?.value;
  if(actividad==='bike'&&typeof window!=='undefined'&&window.MallabiMotor?.fetchAlternatives){
   const parts=[];
   try{
