@@ -48,7 +48,7 @@ jobs:
           node scripts/construye.cjs
           node scripts/construye.cjs --comprueba
           node scripts/revisa-tipos.cjs
-          node --test tests/*.test.cjs engine-mallabi/tests/*.test.cjs
+          node --test --test-force-exit --test-timeout=30000 tests/*.test.cjs engine-mallabi/tests/*.test.cjs
           # MallabiGPS no anuncia una APK hasta publicarla. Probar ausencia
           # real del aviso y luego simular una publicación, sin tocar la app.
           python3 - <<'PY'
