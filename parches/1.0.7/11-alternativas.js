@@ -1,7 +1,7 @@
 // Un solo creador. Las alternativas son una vista previa, no un borrador.
 let altInicio=null,altActivo=false,altGeneracion=0,altCapas=[],altControl=null;
 function limpiaCapasAlternativas(){altCapas.forEach(l=>map.removeLayer(l));altCapas=[];}
-function cancelaAlternativas(){altGeneracion++;altActivo=false;altInicio=null;if(altControl)altControl.abort();altControl=null;limpiaCapasAlternativas();$('alternativasPanel').classList.add('hidden');$('alternativasLista').replaceChildren();$('modoDosPuntos').setAttribute('aria-pressed','false');$('modoManual').setAttribute('aria-pressed','true');}
+function cancelaAlternativas(){altGeneracion++;altActivo=false;altInicio=null;if(altControl)altControl.abort();altControl=null;limpiaCapasAlternativas();$('alternativasPanel').classList.add('hidden');$('alternativasLista').replaceChildren();$('alternativasLista').classList.remove('compact-preview');$('modoDosPuntos').setAttribute('aria-pressed','false');$('modoManual').setAttribute('aria-pressed','true');}
 function capturaAlternativas(e){
  if(!altActivo)return false;
  if(!redGps){notice('Preparando caminos…');return true;}
@@ -23,13 +23,19 @@ async function calculaAlternativas(a,b){
   if(!opciones.length)throw Error('No hay recorridos válidos entre los dos puntos');
   limpiaCapasAlternativas();lista.replaceChildren();lista.classList.remove('hidden');
   const colors=['#38bdf8','#ffad4a','#a3e66c'];
+  let selected=0;const buttons=[];
+  const choose=document.createElement('button');choose.type='button';choose.className='alternativaConfirmar';choose.textContent='Elegir ruta';
+  const preview=i=>{selected=i;altCapas.forEach((l,j)=>{if(j===i){if(!map.hasLayer(l))l.addTo(map);}else if(map.hasLayer(l))map.removeLayer(l);});buttons.forEach((x,j)=>x.setAttribute('aria-pressed',String(i===j)));const dock=$('creadorDock');map.fitBounds(altCapas[i].getBounds(),{paddingTopLeft:[35,110],paddingBottomRight:[65,(dock?.offsetHeight||140)+25]});estado.textContent='Vista previa · '+(i?'Alternativa '+i:'Ruta principal');};
   for(let i=0;i<opciones.length;i++){
    const r=opciones[i],layer=L.polyline(r.parts[0].map(p=>p.slice(0,2)),{color:colors[i],weight:5,opacity:.8,interactive:false}).addTo(map);altCapas.push(layer);
    const button=document.createElement('button');button.type='button';button.className='alternativa';button.style.borderLeftColor=colors[i];
-   const title=document.createElement('b');title.textContent=i?'Alternativa '+i:'Ruta principal';const info=document.createElement('small');
-   info.textContent=(r.comparison.distance/1000).toFixed(2).replace('.',',')+' km · '+r.provider+' · '+(r.comparison.ascent===null?'Desnivel pendiente': '+'+Math.round(r.comparison.ascent)+' m');
-   button.append(title,info);lista.append(button);
-   button.onclick=async()=>{
+   const title=document.createElement('b');title.textContent=i?'Alternativa '+i:'Principal';const info=document.createElement('small');
+   info.textContent=(r.comparison.distance/1000).toFixed(2).replace('.',',')+' km'+(r.comparison.ascent===null?'':' · +'+Math.round(r.comparison.ascent)+' m');
+   button.append(title,info);lista.append(button);buttons.push(button);
+   button.onclick=()=>{if(!altControl&&gen===altGeneracion)preview(i);};
+  }
+  lista.append(choose);lista.classList.add('compact-preview');
+  choose.onclick=async()=>{const r=opciones[selected];
     if(altControl||gen!==altGeneracion)return;
     if(drawPoints.length>1&&!confirm('¿Sustituir el borrador actual por este recorrido?'))return;
     altControl=ctl;lista.querySelectorAll('button').forEach(x=>x.disabled=true);estado.textContent='Preparando recorrido y alturas…';
@@ -38,8 +44,7 @@ async function calculaAlternativas(a,b){
     if(gen!==altGeneracion)return;
     cancelaAlternativas();aplicaMapaGps(r);notice('Recorrido elegido. Puedes añadir puntos o editarlo.');
    };
-  }
-  map.fitBounds(L.featureGroup(altCapas).getBounds(),{padding:[30,30]});estado.textContent='Elige un recorrido · '+opciones.length+' disponibles';
+  preview(0);
  }catch(e){if(gen===altGeneracion){estado.textContent=e.message+' · Vuelve a marcar los puntos';limpiaCapasAlternativas();altInicio=null;}}
  finally{if(gen===altGeneracion)altControl=null;}
 }
