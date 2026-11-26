@@ -1,9 +1,10 @@
-name: Compilar MallabiGPS 1.0.6
+name: Compilar MallabiGPS 1.0.7
 on:
   push:
     paths:
       - '.github/workflows/compilar-mallabigps.yml'
       - 'MallabiGPS-1.0.6-codigo-candidato.zip'
+      - 'parches/1.0.7/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,6 +24,7 @@ jobs:
           test "$(git hash-object MallabiGPS-1.0.6-codigo-candidato.zip)" = 128b087e6e25cdd02a94f58fbb384d2c9033e629
           unzip -tq MallabiGPS-1.0.6-codigo-candidato.zip
           unzip -q MallabiGPS-1.0.6-codigo-candidato.zip
+          python3 parches/1.0.7/aplicar.py
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -43,6 +45,7 @@ jobs:
           npm install --no-save --no-package-lock typescript@5.6.3 playwright
           export PATH="$PWD/node_modules/.bin:$PATH"
           npx playwright install --with-deps chromium
+          node scripts/construye.cjs
           node scripts/construye.cjs --comprueba
           node scripts/revisa-tipos.cjs
           node --test tests/*.test.cjs engine-mallabi/tests/*.test.cjs
@@ -57,7 +60,7 @@ jobs:
           assert s.count(a) == 1 and s.count(b) == 1
           s = s.replace(a, '''      await pv.waitForTimeout(1500);
                 assert(!(await pv.locator("#appUpdate").isVisible()), "sin APK publicada no se anuncia una actualización");
-                const publicada = "1.0.6";
+                const publicada = "1.0.7";
                 await ctxV.route("**/instalar.html", r => r.fulfill({contentType:"text/html",body:"<!--VER-->" + publicada + "<!--/VER-->"}));
                 await pv.reload();
                 await pv.waitForSelector("#appUpdate:not(.hidden)", { timeout: 10000 });''').replace(b, '')
@@ -81,12 +84,12 @@ jobs:
             printf '%s' "$KEY_B64" | base64 --decode > android/firma/mallabi.p12
             export MALLABI_FIRMA_OBLIGATORIA=1
             pkg=com.trabakutik.mallabigps
-            name=MallabiGPS-1.0.6-candidato
+            name=MallabiGPS-1.0.7-candidato
           else
             # No sustituye instalaciones existentes: identificador separado.
             sed -i 's/applicationId = "com.trabakutik.mallabigps"/applicationId = "com.trabakutik.mallabigps.pruebas"/' android/app/build.gradle.kts
             pkg=com.trabakutik.mallabigps.pruebas
-            name=MallabiGPS-1.0.6-pruebas-independiente
+            name=MallabiGPS-1.0.7-pruebas-independiente
           fi
           gradle -p android --no-daemon lintDebug assembleDebug
           apk=android/app/build/outputs/apk/debug/app-debug.apk
@@ -101,7 +104,7 @@ jobs:
           sha256sum *.apk > SHA256.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: MallabiGPS-1.0.6-APK
+          name: MallabiGPS-1.0.7-APK
           path: MallabiGPS-integracion/dist/
           if-no-files-found: error
       - name: Limpiar clave
