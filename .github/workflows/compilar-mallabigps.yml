@@ -46,6 +46,23 @@ jobs:
           node scripts/construye.cjs --comprueba
           node scripts/revisa-tipos.cjs
           node --test tests/*.test.cjs engine-mallabi/tests/*.test.cjs
+          # MallabiGPS no anuncia una APK hasta publicarla. Probar ausencia
+          # real del aviso y luego simular una publicación, sin tocar la app.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/test-browser.cjs')
+          s = p.read_text()
+          a = '      await pv.waitForSelector("#appUpdate:not(.hidden)", { timeout: 10000 });'
+          b = '      const publicada = fs.readFileSync(path.join(root, "instalar.html"), "utf8").match(/<!--VER-->([\\d.]+)<!--\\/VER-->/)[1];'
+          assert s.count(a) == 1 and s.count(b) == 1
+          s = s.replace(a, '''      await pv.waitForTimeout(1500);
+                assert(!(await pv.locator("#appUpdate").isVisible()), "sin APK publicada no se anuncia una actualización");
+                const publicada = "1.0.6";
+                await ctxV.route("**/instalar.html", r => r.fulfill({contentType:"text/html",body:"<!--VER-->" + publicada + "<!--/VER-->"}));
+                await pv.reload();
+                await pv.waitForSelector("#appUpdate:not(.hidden)", { timeout: 10000 });''').replace(b, '')
+          p.write_text(s)
+          PY
           node scripts/test-browser.cjs
           python3 scripts/test-native-turns.py
           for t in regression_tracking sin_senal_gps silencio background_lifecycle giros_limite grabaciones_borrar caida_sos barometro llegada fuera_ruta_igual tiempo_marcha informe_fallo; do python3 "tests/$t.py"; done
