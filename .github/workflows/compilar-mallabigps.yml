@@ -1,0 +1,89 @@
+name: Compilar MallabiGPS 1.0.6
+on:
+  push:
+    paths:
+      - '.github/workflows/compilar-mallabigps.yml'
+      - 'MallabiGPS-1.0.6-codigo-candidato.zip'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  android:
+    if: github.repository == 'trabaku/MallabiGPS'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: MallabiGPS-integracion
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verificar y extraer codigo
+        working-directory: .
+        run: |
+          test "$(git hash-object MallabiGPS-1.0.6-codigo-candidato.zip)" = 128b087e6e25cdd02a94f58fbb384d2c9033e629
+          unzip -tq MallabiGPS-1.0.6-codigo-candidato.zip
+          unzip -q MallabiGPS-1.0.6-codigo-candidato.zip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Pruebas de codigo
+        run: |
+          npm install --no-save --no-package-lock typescript@5.6.3 playwright
+          export PATH="$PWD/node_modules/.bin:$PATH"
+          npx playwright install --with-deps chromium
+          node scripts/construye.cjs --comprueba
+          node scripts/revisa-tipos.cjs
+          node --test tests/*.test.cjs engine-mallabi/tests/*.test.cjs
+          node scripts/test-browser.cjs
+          python3 scripts/test-native-turns.py
+          for t in regression_tracking sin_senal_gps silencio background_lifecycle giros_limite grabaciones_borrar caida_sos barometro llegada fuera_ruta_igual tiempo_marcha informe_fallo; do python3 "tests/$t.py"; done
+          python3 scripts/test-gasto-bateria.py
+          python3 scripts/test-nombre-descarga.py
+      - name: Compilar y verificar APK de pruebas
+        env:
+          KEY_B64: ${{ secrets.MALLABI_FIRMA_P12_BASE64 }}
+          MALLABI_FIRMA_CLAVE: ${{ secrets.MALLABI_FIRMA_CLAVE }}
+          MALLABI_FIRMA_ALIAS: ${{ secrets.MALLABI_FIRMA_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$KEY_B64" && -n "$MALLABI_FIRMA_CLAVE" && -n "$MALLABI_FIRMA_ALIAS" ]]; then
+            umask 077
+            mkdir -p android/firma
+            printf '%s' "$KEY_B64" | base64 --decode > android/firma/mallabi.p12
+            export MALLABI_FIRMA_OBLIGATORIA=1
+            pkg=com.trabakutik.mallabigps
+            name=MallabiGPS-1.0.6-candidato
+          else
+            # No sustituye instalaciones existentes: identificador separado.
+            sed -i 's/applicationId = "com.trabakutik.mallabigps"/applicationId = "com.trabakutik.mallabigps.pruebas"/' android/app/build.gradle.kts
+            pkg=com.trabakutik.mallabigps.pruebas
+            name=MallabiGPS-1.0.6-pruebas-independiente
+          fi
+          gradle -p android --no-daemon lintDebug assembleDebug
+          apk=android/app/build/outputs/apk/debug/app-debug.apk
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          "$tools/apksigner" verify --verbose --print-certs "$apk"
+          "$tools/zipalign" -c -P 16 4 "$apk"
+          if [[ "$pkg" == com.trabakutik.mallabigps ]]; then python3 scripts/verifica-firma-mallabi.py "$apk"; fi
+          "$tools/aapt" dump badging "$apk" | grep -F "package: name='$pkg'"
+          mkdir -p dist
+          cp "$apk" "dist/$name.apk"
+          cd dist
+          sha256sum *.apk > SHA256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MallabiGPS-1.0.6-APK
+          path: MallabiGPS-integracion/dist/
+          if-no-files-found: error
+      - name: Limpiar clave
+        if: always()
+        run: rm -f android/firma/mallabi.p12
