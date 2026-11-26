@@ -1,0 +1,55 @@
+// Un solo creador. Las alternativas son una vista previa, no un borrador.
+let altInicio=null,altActivo=false,altGeneracion=0,altCapas=[],altControl=null;
+function limpiaCapasAlternativas(){altCapas.forEach(l=>map.removeLayer(l));altCapas=[];}
+function cancelaAlternativas(){altGeneracion++;altActivo=false;altInicio=null;if(altControl)altControl.abort();altControl=null;limpiaCapasAlternativas();$('alternativasPanel').classList.add('hidden');$('alternativasLista').replaceChildren();$('modoDosPuntos').setAttribute('aria-pressed','false');$('modoManual').setAttribute('aria-pressed','true');}
+function capturaAlternativas(e){
+ if(!altActivo)return false;
+ if(!redGps){notice('Preparando caminos…');return true;}
+ if(altControl||!$('alternativasLista').classList.contains('hidden'))return true;
+ const p=[e.latlng.lat,e.latlng.lng];
+ if(!altInicio){altInicio=p;altCapas.push(L.circleMarker(p,{radius:8,color:'#73e8e7',fillOpacity:1}).addTo(map));$('alternativasEstado').textContent='Ahora marca el destino';return true;}
+ if(dist(altInicio,p)<10)return true;
+ void calculaAlternativas(altInicio,p);return true;
+}
+async function calculaAlternativas(a,b){
+ if(!confirm('Los puntos se enviarán a los servicios de rutas Valhalla, OSRM y, para bicicleta, BRouter. ¿Continuar?')){cancelaAlternativas();return;}
+ const gen=++altGeneracion,ctl=new AbortController();altControl=ctl;
+ const tipo=$('alternativasActividad').value;const estado=$('alternativasEstado'),lista=$('alternativasLista');
+ estado.textContent='Buscando recorridos diferentes…';
+ try{
+  const raw=await window.MallabiMotor.fetchAlternatives(a,b,tipo);
+  if(gen!==altGeneracion)return;
+  const opciones=raw.map(r=>{const parts=r.parts.map(p=>p.map(q=>q.slice()));return {...r,parts,anchors:[parts[0][0],parts[0].at(-1)]};}).filter(r=>window.MallabiMotor.validaAlternativa([a,b],r));
+  if(!opciones.length)throw Error('No hay recorridos válidos entre los dos puntos');
+  limpiaCapasAlternativas();lista.replaceChildren();lista.classList.remove('hidden');
+  const colors=['#38bdf8','#ffad4a','#a3e66c'];
+  for(let i=0;i<opciones.length;i++){
+   const r=opciones[i],layer=L.polyline(r.parts[0].map(p=>p.slice(0,2)),{color:colors[i],weight:5,opacity:.8,interactive:false}).addTo(map);altCapas.push(layer);
+   const button=document.createElement('button');button.type='button';button.className='alternativa';button.style.borderLeftColor=colors[i];
+   const title=document.createElement('b');title.textContent=i?'Alternativa '+i:'Ruta principal';const info=document.createElement('small');
+   info.textContent=(r.comparison.distance/1000).toFixed(2).replace('.',',')+' km · '+r.provider+' · '+(r.comparison.ascent===null?'Desnivel pendiente': '+'+Math.round(r.comparison.ascent)+' m');
+   button.append(title,info);lista.append(button);
+   button.onclick=async()=>{
+    if(altControl||gen!==altGeneracion)return;
+    if(drawPoints.length>1&&!confirm('¿Sustituir el borrador actual por este recorrido?'))return;
+    altControl=ctl;lista.querySelectorAll('button').forEach(x=>x.disabled=true);estado.textContent='Preparando recorrido y alturas…';
+    const timer=setTimeout(()=>ctl.abort(),20000);
+    try{await alturasTerrenoGps(r,ctl.signal);}catch(e){}finally{clearTimeout(timer)}
+    if(gen!==altGeneracion)return;
+    cancelaAlternativas();aplicaMapaGps(r);notice('Recorrido elegido. Puedes añadir puntos o editarlo.');
+   };
+  }
+  map.fitBounds(L.featureGroup(altCapas).getBounds(),{padding:[30,30]});estado.textContent='Elige un recorrido · '+opciones.length+' disponibles';
+ }catch(e){if(gen===altGeneracion){estado.textContent=e.message+' · Vuelve a marcar los puntos';limpiaCapasAlternativas();altInicio=null;}}
+ finally{if(gen===altGeneracion)altControl=null;}
+}
+if(typeof document!=='undefined'){
+ const panel=$('alternativasPanel');
+ if(panel){
+  panel.addEventListener('click',e=>e.stopPropagation());panel.addEventListener('dblclick',e=>e.stopPropagation());
+  $('creadorModo').addEventListener('click',e=>e.stopPropagation());
+  $('modoManual').onclick=cancelaAlternativas;
+  $('modoDosPuntos').onclick=()=>{if(calculandoMapaGps)return;cancelaAlternativas();altActivo=true;$('modoDosPuntos').setAttribute('aria-pressed','true');$('modoManual').setAttribute('aria-pressed','false');$('alternativasLista').classList.add('hidden');panel.classList.remove('hidden');$('alternativasEstado').textContent='Marca el inicio en el mapa';};
+  $('alternativasCerrar').onclick=cancelaAlternativas;
+ }
+}
