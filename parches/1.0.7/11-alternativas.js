@@ -34,11 +34,11 @@ async function calculaAlternativas(a,b){
    button.append(title,info);lista.append(button);buttons.push(button);
    button.onclick=()=>{if(!altControl&&gen===altGeneracion)preview(i);};
   }
-  lista.append(choose);lista.classList.add('compact-preview');
+  const cancel=document.createElement('button');cancel.type='button';cancel.className='alternativaCancelar';cancel.textContent='Cancelar';cancel.onclick=cancelaAlternativas;lista.append(cancel,choose);lista.classList.add('compact-preview');
   choose.onclick=async()=>{const r=opciones[selected];
     if(altControl||gen!==altGeneracion)return;
     if(drawPoints.length>1&&!confirm('¿Sustituir el borrador actual por este recorrido?'))return;
-    altControl=ctl;lista.querySelectorAll('button').forEach(x=>x.disabled=true);estado.textContent='Preparando recorrido y alturas…';
+    altControl=ctl;lista.querySelectorAll('button:not(.alternativaCancelar)').forEach(x=>x.disabled=true);estado.textContent='Preparando recorrido y alturas…';
     const timer=setTimeout(()=>ctl.abort(),20000);
     try{await alturasTerrenoGps(r,ctl.signal);}catch(e){}finally{clearTimeout(timer)}
     if(gen!==altGeneracion)return;
@@ -56,5 +56,6 @@ if(typeof document!=='undefined'){
   $('modoManual').onclick=cancelaAlternativas;
   $('modoDosPuntos').onclick=()=>{if(calculandoMapaGps)return;cancelaAlternativas();altActivo=true;$('modoDosPuntos').setAttribute('aria-pressed','true');$('modoManual').setAttribute('aria-pressed','false');$('alternativasLista').classList.add('hidden');panel.classList.remove('hidden');$('alternativasEstado').textContent='Marca el inicio en el mapa';};
   $('alternativasCerrar').onclick=cancelaAlternativas;
+  $('alternativasActividad').onchange=()=>{cancelaAlternativas();cancelaMapaGps();};
  }
 }
