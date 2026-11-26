@@ -78,25 +78,22 @@ jobs:
           MALLABI_FIRMA_ALIAS: ${{ secrets.MALLABI_FIRMA_ALIAS }}
         run: |
           set -euo pipefail
-          if [[ -n "$KEY_B64" && -n "$MALLABI_FIRMA_CLAVE" && -n "$MALLABI_FIRMA_ALIAS" ]]; then
-            umask 077
-            mkdir -p android/firma
-            printf '%s' "$KEY_B64" | base64 --decode > android/firma/mallabi.p12
-            export MALLABI_FIRMA_OBLIGATORIA=1
-            pkg=com.trabakutik.mallabigps
-            name=MallabiGPS-1.0.7-candidato
-          else
-            # No sustituye instalaciones existentes: identificador separado.
-            sed -i 's/applicationId = "com.trabakutik.mallabigps"/applicationId = "com.trabakutik.mallabigps.pruebas"/' android/app/build.gradle.kts
-            pkg=com.trabakutik.mallabigps.pruebas
-            name=MallabiGPS-1.0.7-pruebas-independiente
+          if [[ -z "$KEY_B64" || -z "$MALLABI_FIRMA_CLAVE" || -z "$MALLABI_FIRMA_ALIAS" ]]; then
+            echo "::error::Falta configurar la firma permanente de MallabiGPS. No se publicará una APK con firma temporal."
+            exit 1
           fi
+          umask 077
+          mkdir -p android/firma
+          printf '%s' "$KEY_B64" | base64 --decode > android/firma/mallabi.p12
+          export MALLABI_FIRMA_OBLIGATORIA=1
+          pkg=com.trabakutik.mallabigps
+          name=MallabiGPS-1.0.7-candidato
           gradle -p android --no-daemon lintDebug assembleDebug
           apk=android/app/build/outputs/apk/debug/app-debug.apk
           tools="$ANDROID_HOME/build-tools/35.0.0"
           "$tools/apksigner" verify --verbose --print-certs "$apk"
           "$tools/zipalign" -c -P 16 4 "$apk"
-          if [[ "$pkg" == com.trabakutik.mallabigps ]]; then python3 scripts/verifica-firma-mallabi.py "$apk"; fi
+          python3 scripts/verifica-firma-mallabi.py "$apk"
           "$tools/aapt" dump badging "$apk" | grep -F "package: name='$pkg'"
           mkdir -p dist
           cp "$apk" "dist/$name.apk"
