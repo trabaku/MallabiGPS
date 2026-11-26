@@ -93,3 +93,14 @@ test('BTT no solicita OSRM como alternativa',()=>assert.match(app,/if\\(mode!=='
 test('BTT manual usa perfil ciclista y no fallback peatonal',()=>{assert.match(creator,/fetchAlternatives\\(from,coords\\[i\\],'bike'\\)/);assert.match(creator,/e.calzadaDudosa=true;throw e/);});
 test('actividad visible en el creador único y cancelar vista previa',()=>{assert.match(html,/id="creadorDock"><label id="creadorActividad"/);assert.match(ui,/cancel.onclick=cancelaAlternativas/);});
 """)
+
+# El contrato nuevo excluye OSRM en BTT; conservar la prueba de fallback
+# para senderismo y añadir una regresión explícita para bicicleta.
+p=root/"engine-mallabi/tests/alternatives.test.cjs"
+s=p.read_text()
+a=s.index("test('a valid OSRM route survives failures of other engines'")
+b=s.index("test('diagnostics expose provider failures'",a)
+s=s[:a]+s[a:b].replace("other engines","other engines in walking mode").replace("fetchAlternatives(a,b,'bike')","fetchAlternatives(a,b,'foot')")+s[b:]
+s=s.replace("/Valhalla: HTTP 429.*OSRM: HTTP 429.*BRouter: HTTP 429/","/Valhalla: HTTP 429.*BRouter: HTTP 429/")
+s+="\ntest('BTT never falls back to OSRM when mountain engines fail',async()=>{const calls=[];c.fetch=async url=>{calls.push(url);return {ok:false,status:503}};await assert.rejects(c.fetchAlternatives(a,b,'bike'),/Ningún motor/);assert.equal(calls.some(url=>url.includes('routing.openstreetmap.de')),false);});\n"
+p.write_text(s)
