@@ -1,0 +1,656 @@
+diff --git a/android/app/build.gradle.kts b/android/app/build.gradle.kts
+index 2bf4a3c..89be67f 100644
+--- a/android/app/build.gradle.kts
++++ b/android/app/build.gradle.kts
+@@ -2,7 +2,7 @@ plugins { id("com.android.application") }
+ android {
+  namespace = "com.trabakutik.gps"
+  compileSdk = 35
+- defaultConfig { applicationId = "com.trabakutik.mallabigps"; minSdk = 26; targetSdk = 35; versionCode = 153; versionName = "1.0.9" }
++ defaultConfig { applicationId = "com.trabakutik.mallabigps"; minSdk = 26; targetSdk = 35; versionCode = 154; versionName = "1.0.10" }
+  compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+  // Firma independiente de MallabiGPS, nunca la del navegador antiguo.
+  val llaveFija = rootProject.file("firma/mallabi.p12")
+diff --git a/engine-mallabi/adapter.js b/engine-mallabi/adapter.js
+index 2c2d37a..a69f138 100644
+--- a/engine-mallabi/adapter.js
++++ b/engine-mallabi/adapter.js
+@@ -138,4 +138,4 @@ async function planificaOSRM(coords,signal,locked=false,request=fetch){
+  if(!validaAlternativa(coords,result))throw Error('OSRM: recorrido discontinuo o alejado de los puntos marcados');
+  return result;
+ }
+-if(typeof window!=='undefined')window.MallabiMotor={integra,validaAlternativa,roundaboutQuery,loadRoundaboutGraph,integraRotondas,planificaOSRM,fetchAlternatives};
++if(typeof window!=='undefined')window.MallabiMotor={integra,validaAlternativa,roundaboutQuery,loadRoundaboutGraph,integraRotondas,planificaOSRM,fetchAlternatives,fetchBttDetour,uniqueAlternatives};
+diff --git a/engine-mallabi/assets/app.js b/engine-mallabi/assets/app.js
+index c9c1cb6..d13d1ef 100644
+--- a/engine-mallabi/assets/app.js
++++ b/engine-mallabi/assets/app.js
+@@ -606,8 +606,9 @@ async function fetchValhalla(points,mode,locked=false) {
+   return valhallaLegs(await response.json(),points,mode,locked);
+ }
+ // BRouter HTTP adapter (open-source engine, not bundled). Only for bicycle routes.
+-function brouterRequest(origin,target,index=0) {
++function brouterRequest(origin,target,index=0,evitar=[]) {
+   const params=new URLSearchParams({lonlats:[origin,target].map(p=>p[1]+','+p[0]).join('|'),profile:'mtb',alternativeidx:String(index),format:'geojson',timode:'1'});
++  if(evitar.length)params.set('nogos',evitar.map(([lat,lon])=>lon+','+lat+',35').join('|'));
+   return 'https://brouter.de/brouter?'+params;
+ }
+ // BRouter FormatJson exports [indexInTrack, command, signedExit, distanceToNext, angle].
+@@ -660,13 +661,20 @@ function brouterLeg(payload,origin,target,context={}) {
+   // Prefer explicit provider instructions. Without them, use the original descriptive GPX curve hints.
+   const hints=brouterVoiceTurns(path,feature.properties?.voicehints);
+   const turns=hints.length?hints:trackTurns([path]);
+-  return {source:'network',provider:'BRouter',mode:'bike',target,name:'Ruta BTT · BRouter',parts:[path],turns,steps:[],networkDistance:distance};
++  return {source:'network',provider:'BRouter',mode:'bike',target,name:'Ruta BTT · BRouter',terrain:feature.properties?.messages,parts:[path],turns,steps:[],networkDistance:distance};
+ }
+ async function fetchBRouter(origin,target,context={}) {
+   const response=await fetch(brouterRequest(origin,target),{signal:AbortSignal.timeout(10000)});
+   if(!response.ok)throw new Error('BRouter HTTP '+response.status);
+   return brouterLeg(await response.json(),origin,target,context);
+ }
++async function fetchBttDetour(origin,target,evitar,signal) {
++  const centres=evitar.filter(p=>meters(p,origin)>55&&meters(p,target)>55).slice(0,4);
++  if(!centres.length)return null;
++  const response=await fetch(brouterRequest(origin,target,0,centres),{signal:AbortSignal.any([signal,AbortSignal.timeout(6000)])});
++  if(!response.ok)return null;
++  return alternativeModel(brouterLeg(await response.json(),origin,target),origin,target);
++}
+ async function fetchEditorRoute(origin,target,mode,context={}) {
+   try{return (await fetchValhalla([origin,target],mode,!!(context.hint||context.connected||context.previous)))[0];}
+   catch(v){try{const result=await fetchRoute(origin,target,mode,context);return {...result,provider:'OSRM'};}catch(o){
+@@ -705,8 +713,15 @@ function valhallaAlternatives(payload,origin,target,mode){
+   for(const trip of [payload,...(Array.isArray(payload.alternates)?payload.alternates:[])]){try{result.push(valhallaLegs(trip,[origin,target],mode)[0]);}catch{}}
+   return result;
+ }
+-async function fetchAlternatives(origin,target,mode){
+-  async function json(url){const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),10000);try{const response=await fetch(url,{signal:controller.signal});if(!response.ok)throw Error('HTTP '+response.status);return await response.json();}finally{clearTimeout(timer);}}
++async function fetchAlternatives(origin,target,mode,signal){
++  async function json(url){
++    const controller=new AbortController(),cancel=()=>controller.abort();
++    const timer=setTimeout(cancel,10000);
++    signal?.addEventListener('abort',cancel,{once:true});
++    if(signal?.aborted)cancel();
++    try{const response=await fetch(url,{signal:controller.signal});if(!response.ok)throw Error('HTTP '+response.status);return await response.json();}
++    finally{clearTimeout(timer);signal?.removeEventListener('abort',cancel);}
++  }
+   const candidates=[],errors=[];
+   async function attempt(label,fn){try{const items=await fn();if(!items.length)throw Error('Sin recorridos');for(const item of items){try{alternativeModel(item,origin,target);candidates.push(item);}catch(e){errors.push(label+': '+e.message);}}}catch(e){errors.push(label+': '+(e.name==='AbortError'?'Tiempo agotado':e.message));}}
+   async function valhalla(n){const payload=await json(valhallaRequest([origin,target],mode,n));const result=valhallaLegs(payload,[origin,target],mode);for(const alt of payload.alternates||[]){try{result.push(valhallaLegs(alt,[origin,target],mode)[0]);}catch(e){errors.push('Valhalla alternativa: '+e.message);}}return result;}
+@@ -717,8 +732,11 @@ async function fetchAlternatives(origin,target,mode){
+   if(mode!=='bike')primary.push(attempt('OSRM',osrm));
+   if(mode==='bike')primary.push(attempt('BRouter',()=>brouter(0)));
+   await Promise.all(primary);
++  if(signal?.aborted)throw Error('Cálculo cancelado');
+   if(!candidates.length)throw Error('Ningún motor devolvió un recorrido válido. '+errors.join(' · '));
+   if(uniqueAlternatives(candidates,origin,target).length<3){const extra=[attempt('Valhalla alternativas',()=>valhalla(2))];if(mode==='bike')extra.push(attempt('BRouter alternativa 1',()=>brouter(1)),attempt('BRouter alternativa 2',()=>brouter(2)));await Promise.all(extra);}
++  if(mode==='bike'&&uniqueAlternatives(candidates,origin,target).length<3&&!signal?.aborted)
++    await attempt('BRouter alternativa 3',()=>brouter(3));
+   const priority=mode==='bike'?{BRouter:0,Valhalla:1,OSRM:2}:{Valhalla:0,OSRM:1,BRouter:2}; candidates.sort((a,b)=>priority[a.provider]-priority[b.provider]);
+   return uniqueAlternatives(candidates,origin,target);
+ }
+diff --git a/engine-mallabi/tests/activity-109.test.cjs b/engine-mallabi/tests/activity-109.test.cjs
+index 2e51aeb..1399c66 100644
+--- a/engine-mallabi/tests/activity-109.test.cjs
++++ b/engine-mallabi/tests/activity-109.test.cjs
+@@ -5,5 +5,5 @@ const creator=fs.readFileSync(path.join(root,'src/js/05-creador-tramos.js'),'utf
+ const html=fs.readFileSync(path.join(root,'src/nuevo.plantilla.html'),'utf8');
+ const ui=fs.readFileSync(path.join(root,'src/js/11-alternativas.js'),'utf8');
+ test('BTT no solicita OSRM como alternativa',()=>assert.match(app,/if\(mode!=='bike'\)primary.push\(attempt\('OSRM'/));
+-test('BTT manual usa perfil ciclista y no fallback peatonal',()=>{assert.match(creator,/fetchAlternatives\(from,coords\[i\],'bike'\)/);assert.match(creator,/e.calzadaDudosa=true;throw e/);});
++test('BTT manual usa perfil ciclista y no fallback peatonal',()=>{assert.match(creator,/fetchAlternatives\(from,coords\[i\],actividad,signal\)/);assert.match(creator,/e.calzadaDudosa=true;throw e/);});
+ test('actividad visible en el creador único y cancelar vista previa',()=>{assert.match(html,/id="creadorDock"><label id="creadorActividad"/);assert.match(ui,/cancel.onclick=cancelaAlternativas/);});
+diff --git a/engine-mallabi/tests/btt-rampas.test.cjs b/engine-mallabi/tests/btt-rampas.test.cjs
+new file mode 100644
+index 0000000..4c93305
+--- /dev/null
++++ b/engine-mallabi/tests/btt-rampas.test.cjs
+@@ -0,0 +1,52 @@
++const test=require('node:test');
++const assert=require('node:assert/strict');
++const fs=require('node:fs');
++const vm=require('node:vm');
++const path=require('node:path');
++
++const root=path.resolve(__dirname,'../..');
++const creator=fs.readFileSync(path.join(root,'src/js/05-creador-tramos.js'),'utf8');
++const btt=fs.readFileSync(path.join(root,'src/js/12-btt.js'),'utf8');
++const ctx=vm.createContext({module:{exports:{}},alturasTerrenoGps:async()=>{}});
++vm.runInContext(creator.split('\n').find(l=>l.startsWith('function metros2('))+'\n'+btt,ctx);
++const {rampasBtt,revisaCandidatasBtt,firmeBtt,textoRevisionBtt}=ctx.module.exports;
++const puntos=(pendiente,base=0)=>Array.from({length:26},(_,i)=>[43+i*20/111195,-2.5,base+i*20*pendiente]);
++const candidato=(points,mode='bike')=>({parts:[points],mode});
++
++test('sustained steep ascent requires confirmation and gives a segment to draw',()=>{
++ const check=rampasBtt([puntos(.31)]);
++ assert.equal(check.alturaIncierta,false);
++ assert.equal(check.tramos.length,1);
++ assert.equal(Math.round(check.tramos[0].pendiente),31);
++ assert(check.tramos[0].puntos.length>4);
++ assert.match(textoRevisionBtt(check),/Probable tramo a pie/);
++});
++test('descending, paved and isolated spikes do not create the loose-terrain warning',()=>{
++ const arriba=puntos(.31);
++ assert.equal(rampasBtt([arriba.toReversed()]).tramos.length,0);
++ assert.equal(rampasBtt([arriba],[{desde:0,hasta:501}]).tramos.length,0);
++ const spike=puntos(0);
++ spike[10][2]=70;
++ assert.equal(rampasBtt([spike]).tramos.length,0);
++});
++test('uncertain elevation is kept behind alternatives with known acceptable elevation',async()=>{
++ const peligrosa=candidato(puntos(.31)), buena=candidato(puntos(.10));
++ const dudosa=candidato(puntos(.10).map(p=>[p[0],p[1],null]));
++ const ordered=await revisaCandidatasBtt([peligrosa,dudosa,buena],new AbortController().signal);
++ assert.deepEqual(Array.from(ordered,x=>x.parts),[buena.parts,dudosa.parts,peligrosa.parts]);
++ assert.match(textoRevisionBtt(ordered[1].revisionBtt),/faltan alturas/);
++});
++test('the ramp across two short legs is still detected',async()=>{
++ const points=puntos(.31).slice(0,12), anterior=points.slice(0,6), nueva=points.slice(6);
++ assert.equal(rampasBtt([nueva]).tramos.length,0);
++ const checked=await revisaCandidatasBtt([candidato(nueva)],new AbortController().signal,anterior);
++ assert.equal(checked[0].revisionBtt.tramos.length,1);
++});
++test('only matched BRouter rows with good pavement exempt a steep section',()=>{
++ const points=puntos(.31), end=points.at(-1);
++ const header=['Longitude','Latitude','Elevation','Distance','WayTags'];
++ const row=[Math.round(end[1]*1e6),Math.round(end[0]*1e6),155,500,'highway=track surface=asphalt'];
++ assert.equal(firmeBtt({...candidato(points),terrain:[header,row]}).length,1);
++ assert.equal(firmeBtt({...candidato(points),terrain:[header,[...row.slice(0,4),'surface=asphalt smoothness=horrible']]}).length,0);
++ assert.equal(firmeBtt({...candidato(points),terrain:[header,[0,...row.slice(1)]]}).length,0);
++});
+diff --git a/instalar.html b/instalar.html
+index 93509f8..4902306 100644
+--- a/instalar.html
++++ b/instalar.html
+@@ -54,7 +54,7 @@ footer a{color:#9ed9e7}
+ <small>Instalar la aplicación en el móvil</small></header>
+ <main>
+ 
+-<p class="nota"><b>MallabiGPS 1.0.9 — versión candidata.</b> Todavía no hay una APK publicada. No desinstales ni borres la aplicación anterior.</p>
++<p class="nota"><b>MallabiGPS 1.0.10 — versión candidata.</b> Todavía no hay una APK publicada. No desinstales ni borres la aplicación anterior.</p>
+ <p class="nota">El enlace lleva siempre a la última versión. Para ver la que tienes
+ instalada, el número sale abajo en la propia aplicación.</p>
+ 
+diff --git a/scripts/test-browser.cjs b/scripts/test-browser.cjs
+index 3bcbcb6..84dd16c 100644
+--- a/scripts/test-browser.cjs
++++ b/scripts/test-browser.cjs
+@@ -577,6 +577,61 @@ async function setup(context) {
+     assert.match(await creator.locator('#profileLoss').textContent(),/↓ [1-9]/);
+     assert(!/sin datos|Sin alturas/.test(await creator.locator('#elevationSlope').textContent()),'pendiente al marcar');
+     await creator.screenshot({path:path.join(root,'.test-artifacts/planificador-con-desnivel.png')});
++    const opciones=await personal.newPage();
++    opciones.on('dialog',d=>d.accept());
++    await opciones.goto(base+'nuevo.html');
++    await opciones.click('#crearDesdeRuta');
++    await opciones.waitForFunction(()=>window.__creator?.redGps);
++    await opciones.evaluate(()=>{
++      window.MallabiMotor.fetchBttDetour=async()=>null;
++      window.MallabiMotor.fetchAlternatives=async(a,b,mode)=>{
++        return (window.__soloRampa?[1]:[1,0,-1]).map(lado=>{
++          const points=Array.from({length:21},(_,i)=>{
++            const f=i/20;
++            return [a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f+lado*.0004*Math.sin(Math.PI*f),100+(lado===1?170:28)*f];
++          });
++          return {mode,provider:'BRouter',parts:[points],comparison:{distance:555,ascent:lado===1?170:28}};
++        });
++      };
++      window.__toques=()=>{
++        const {map}=window.__creator;
++        map.fire('click',{latlng:L.latLng(43.01,-2.01)});
++        map.fire('click',{latlng:L.latLng(43.015,-2.01)});
++      };
++    });
++    for(const mode of ['bike','foot','car']){
++      await opciones.locator('#alternativasActividad').selectOption(mode);
++      await opciones.click('#modoDosPuntos');
++      await opciones.evaluate(()=>window.__toques());
++      const colors=opciones.locator('#alternativasLista .alternativa');
++      await colors.nth(2).waitFor();
++      assert.equal(await colors.count(),3);
++      if(mode==='bike')assert.doesNotMatch(await opciones.locator('#alternativasEstado').textContent(),/Probable tramo a pie/);
++      await colors.nth(2).click();
++      if(mode==='bike'){
++        assert.match(await opciones.locator('#alternativasEstado').textContent(),/Probable tramo a pie/);
++        assert(await opciones.getByRole('button',{name:'Incluir ruta de todos modos'}).isVisible());
++      }
++      await colors.nth(0).click();
++      await colors.nth(1).click();
++      assert.equal(await colors.nth(1).getAttribute('aria-pressed'),'true');
++      assert.equal(await opciones.evaluate(()=>window.__creator.drawPoints.length),0,'previsualizar no confirma');
++      await opciones.getByRole('button',{name:'Descartar',exact:true}).click();
++      assert.equal(await opciones.evaluate(()=>window.__creator.drawPoints.length),0);
++    }
++    await opciones.locator('#alternativasActividad').selectOption('bike');
++    await opciones.evaluate(()=>{window.__soloRampa=true;window.__toques()});
++    await opciones.getByRole('button',{name:'Descartar tramo'}).waitFor();
++    assert.match(await opciones.locator('#plannerStatus').textContent(),/Probable tramo a pie/);
++    assert.equal(await opciones.evaluate(()=>window.__creator.anclasGps.length),1);
++    await opciones.getByRole('button',{name:'Descartar tramo'}).click();
++    assert.equal(await opciones.evaluate(()=>window.__creator.anclasGps.length),1);
++    await opciones.evaluate(()=>window.__creator.map.fire('click',{latlng:L.latLng(43.015,-2.01)}));
++    await opciones.getByRole('button',{name:'Incluir tramo de todos modos'}).click();
++    await opciones.waitForFunction(()=>window.__creator.anclasGps.length===2);
++    assert.equal(await opciones.locator('#creaTiempo').textContent(),'BTT / e-bike');
++    await opciones.close();
++    console.log('PASS Chromium: tres colores en BTT, Senderismo y Coche; filtro y descarte de rampas en ambos modos');
+     failPlanner=true;
+     await creator.evaluate(()=>window.__creator.map.fire('click',{latlng:L.latLng(43.0108,-2.0103)}));
+     // Aqui no hay red, asi que los caminos de la zona tampoco se han podido
+diff --git a/src/js/05-creador-tramos.js b/src/js/05-creador-tramos.js
+index 554970f..f09cd9a 100644
+--- a/src/js/05-creador-tramos.js
++++ b/src/js/05-creador-tramos.js
+@@ -268,22 +268,31 @@ function mismaCalzada(pedido,pegado,rumbo){
+  const lado=-norte*Math.sin(r)+este*Math.cos(r);
+  return Math.abs(avance)<=CALZADA_AVANCE_M&&Math.abs(lado)<=CALZADA_LADO_M;
+ }
+-async function solicitaMapaGps(coords,signal){
++async function solicitaMapaGps(coords,signal,prefijo=[]){
+  const actividad=typeof document!=='undefined'&&document.getElementById?.('alternativasActividad')?.value;
+- if(actividad==='bike'&&typeof window!=='undefined'&&window.MallabiMotor?.fetchAlternatives){
+-  const parts=[];
++ if((actividad==='bike'||actividad==='car')&&typeof window!=='undefined'&&window.MallabiMotor?.fetchAlternatives){
++  const parts=[],tramos=[];
++  let alturaIncierta=false;
+   try{
+    for(let i=1;i<coords.length;i++){
+     if(signal.aborted)throw Error('Cálculo cancelado');
+     const from=parts.length?parts.at(-1).at(-1):coords[i-1];
+-    const opts=await window.MallabiMotor.fetchAlternatives(from,coords[i],'bike');
++    const opciones=(await window.MallabiMotor.fetchAlternatives(from,coords[i],actividad,signal))
++      .filter(r=>r.mode===actividad&&(!parts.length||dist(from,r.parts[0][0])<=2)&&
++        window.MallabiMotor.validaAlternativa([from,coords[i]],{parts:r.parts,anchors:[r.parts[0][0],r.parts[0].at(-1)]}));
++    const candidatas=actividad==='bike'?await revisaCandidatasBtt(opciones,signal,i===1?prefijo:[],[from,coords[i]]):opciones;
+     if(signal.aborted)throw Error('Cálculo cancelado');
+-    const chosen=opts.find(r=>r.mode==='bike'&&['BRouter','Valhalla'].includes(r.provider)&&(!parts.length||dist(from,r.parts[0][0])<=2));
+-    if(!chosen)throw Error('No se encontró un camino BTT compatible');
++    const chosen=candidatas[0];
++    if(!chosen)throw Error(actividad==='bike'?'No se encontró un camino BTT compatible':'No se encontró una ruta para coche');
+     parts.push(chosen.parts[0]);
++    if(chosen.revisionBtt){
++     tramos.push(...chosen.revisionBtt.tramos);
++     alturaIncierta=alturaIncierta||chosen.revisionBtt.alturaIncierta;
++    }
+    }
+-   const result={anchors:[parts[0][0],...parts.map(p=>p.at(-1))],parts,provider:'BTT'};
+-   if(!window.MallabiMotor.validaAlternativa(coords,result))throw Error('Recorrido BTT discontinuo');
++   const result={anchors:[parts[0][0],...parts.map(p=>p.at(-1))],parts,provider:actividad==='bike'?'BTT':'Coche'};
++   if(!window.MallabiMotor.validaAlternativa(coords,result))throw Error('Recorrido discontinuo');
++   if(actividad==='bike')result.revisionBtt={tramos,alturaIncierta};
+    return result;
+   }catch(e){e.calzadaDudosa=true;throw e;}
+  }
+@@ -522,13 +531,17 @@ async function planificaTramoMapa(desde,hasta){
+  const timer=setTimeout(()=>controller.abort(),30000);
+  try{
+   {const espera=esperaRotondas([desde,hasta]);if(espera)await espera}
+-  const result=await solicitaMapaGps([desde,hasta],controller.signal);
+-  if(version!==calculoMapaGps)return;
+-  try{await alturasTerrenoGps(result,controller.signal);}catch(e){}
++  const result=await solicitaMapaGps([desde,hasta],controller.signal,
++    typeof prefijoBtt==='function'?prefijoBtt(drawPoints,desde):[]);
+   if(version!==calculoMapaGps)return;
++  if(result.revisionBtt){
++   clearTimeout(timer);
++   if(!await confirmaTramoBtt(result,controller.signal)){if(version===calculoMapaGps)estadoMapaGps('Tramo descartado · se conserva el recorrido anterior.');return;}
++  }else try{await alturasTerrenoGps(result,controller.signal);}catch(e){}
++  if(version!==calculoMapaGps||result.revisionBtt&&controller.signal.aborted)return;
+   anadeTramoMapa(result);
+   const completo=result.parts.every(part=>part.every(q=>Number.isFinite(q[2])));
+-  estadoMapaGps(completo?'':'Faltan alturas en este tramo.');
++  estadoMapaGps(result.revisionBtt?textoRevisionBtt(result.revisionBtt,false):completo?'':'Faltan alturas en este tramo.');
+  }catch(e){
+   if(version!==calculoMapaGps)return;
+   // Sin cobertura, con los caminos guardados. Sin desnivel: las cotas las
+@@ -565,6 +578,12 @@ async function planificaMapaGps(coords){
+   {const espera=esperaRotondas(coords);if(espera)await espera}
+   const result=await solicitaMapaGps(coords,controller.signal);
+   if(version!==calculoMapaGps)return;
++  if(result.revisionBtt){
++   clearTimeout(timer);
++   if(!await confirmaTramoBtt(result,controller.signal)){if(version===calculoMapaGps)estadoMapaGps('Recorrido descartado.');return;}
++   if(version!==calculoMapaGps||controller.signal.aborted)return;
++   aplicaMapaGps(result);estadoMapaGps(textoRevisionBtt(result.revisionBtt));return;
++  }
+   aplicaMapaGps(result);$('saveCreated').disabled=true;estadoMapaGps('Calculando desnivel…');
+   try{
+    await alturasTerrenoGps(result,controller.signal);
+@@ -984,6 +1003,13 @@ function textoEsfuerzo(m,sube,pendMax,duros){
+ function pintaCreaResumen(m,sube,baja,conDesnivel,msMide,parcial,pendMax,duros){
+  if(typeof $!=='function'||!$('creaTiempo'))return;
+  if(!(m>=50)){$('creaTiempo').textContent='—';$('creaEsfuerzo').textContent='';return}
++ const actividad=$('alternativasActividad')?.value;
++ if(actividad==='bike'||actividad==='car'){
++  $('creaTiempo').textContent=actividad==='bike'?'BTT / e-bike':'Coche';
++  $('creaEsfuerzo').textContent=actividad==='bike'&&pendMax>=25
++   ?'Rampa fuerte · hasta '+Math.round(pendMax)+' % en el último tramo':'';
++  return;
++ }
+  if(!conDesnivel){$('creaTiempo').innerHTML='≈ '+textoHoras(tiempoMIDE(m,0,0))+' <small>andando · sin datos de desnivel</small>';$('creaEsfuerzo').textContent='';return}
+  const ms=Number.isFinite(msMide)?msMide:tiempoMIDE(m,sube,baja);
+  // Con alturas a medias el desnivel se queda corto: el tiempo se avisa y el
+diff --git a/src/js/06-creador-formas.js b/src/js/06-creador-formas.js
+index 111f2fa..27ed262 100644
+--- a/src/js/06-creador-formas.js
++++ b/src/js/06-creador-formas.js
+@@ -92,7 +92,9 @@ async function mueveAnclaMapa(i,lat,lon){
+    try{
+     r=await solicitaMapaGps([a,b],controller.signal);
+     if(version!==calculoMapaGps)return;
+-    try{await alturasTerrenoGps(r,controller.signal)}catch(e){}
++    if(r.revisionBtt){
++     if(!await confirmaTramoBtt(r,controller.signal)){if(version===calculoMapaGps)estadoMapaGps('Punto sin mover · tramo descartado.');return;}
++    }else try{await alturasTerrenoGps(r,controller.signal)}catch(e){}
+    }catch(e){
+     if(version!==calculoMapaGps)return;
+     r=e.calzadaDudosa?null:planLocalMapa([a,b]);
+diff --git a/src/js/11-alternativas.js b/src/js/11-alternativas.js
+index fd09017..fdc051b 100644
+--- a/src/js/11-alternativas.js
++++ b/src/js/11-alternativas.js
+@@ -1,7 +1,7 @@
+ // Un solo creador. Las alternativas son una vista previa, no un borrador.
+ let altInicio=null,altActivo=false,altGeneracion=0,altCapas=[],altControl=null;
+ function limpiaCapasAlternativas(){altCapas.forEach(l=>map.removeLayer(l));altCapas=[];}
+-function cancelaAlternativas(){altGeneracion++;altActivo=false;altInicio=null;if(altControl)altControl.abort();altControl=null;limpiaCapasAlternativas();$('alternativasPanel').classList.add('hidden');$('alternativasLista').replaceChildren();$('alternativasLista').classList.remove('compact-preview');$('modoDosPuntos').setAttribute('aria-pressed','false');$('modoManual').setAttribute('aria-pressed','true');}
++function cancelaAlternativas(){ $('alternativasEstado').classList.remove('aviso-btt');altGeneracion++;altActivo=false;altInicio=null;if(altControl)altControl.abort();altControl=null;limpiaCapasAlternativas();$('alternativasPanel').classList.add('hidden');$('alternativasLista').replaceChildren();$('alternativasLista').classList.remove('compact-preview');$('modoDosPuntos').setAttribute('aria-pressed','false');$('modoManual').setAttribute('aria-pressed','true');}
+ function capturaAlternativas(e){
+  if(!altActivo)return false;
+  if(!redGps){notice('Preparando caminos…');return true;}
+@@ -12,38 +12,71 @@ function capturaAlternativas(e){
+  void calculaAlternativas(altInicio,p);return true;
+ }
+ async function calculaAlternativas(a,b){
+- if(!confirm('Los puntos se enviarán a los servicios de rutas Valhalla, OSRM y, para bicicleta, BRouter. ¿Continuar?')){cancelaAlternativas();return;}
++ const tipo=$('alternativasActividad').value;
++ const servicios=tipo==='bike'?'Valhalla y BRouter':'Valhalla y OSRM';
++ if(!confirm('Los puntos se enviarán a '+servicios+' para calcular las rutas. ¿Continuar?')){cancelaAlternativas();return;}
+  const gen=++altGeneracion,ctl=new AbortController();altControl=ctl;
+- const tipo=$('alternativasActividad').value;const estado=$('alternativasEstado'),lista=$('alternativasLista');
+- estado.textContent='Buscando recorridos diferentes…';
++ const estado=$('alternativasEstado'),lista=$('alternativasLista');
++ estado.textContent='Buscando hasta 3 recorridos distintos…';
+  try{
+-  const raw=await window.MallabiMotor.fetchAlternatives(a,b,tipo);
++  const raw=await window.MallabiMotor.fetchAlternatives(a,b,tipo,ctl.signal);
+   if(gen!==altGeneracion)return;
+-  const opciones=raw.map(r=>{const parts=r.parts.map(p=>p.map(q=>q.slice()));return {...r,parts,anchors:[parts[0][0],parts[0].at(-1)]};}).filter(r=>window.MallabiMotor.validaAlternativa([a,b],r));
+-  if(!opciones.length)throw Error('No hay recorridos válidos entre los dos puntos');
++  const validas=raw.map(r=>{
++   const parts=r.parts.map(p=>p.map(q=>q.slice()));
++   return {...r,parts,anchors:[parts[0][0],parts[0].at(-1)]};
++  }).filter(r=>r.mode===tipo&&window.MallabiMotor.validaAlternativa([a,b],r));
++  if(!validas.length)throw Error('No hay recorridos válidos entre los dos puntos');
++  if(tipo==='bike')estado.textContent='Comprobando pendientes y firme de las opciones BTT…';
++  const timer=setTimeout(()=>ctl.abort(),22000);
++  let opciones;
++  try{opciones=tipo==='bike'?await revisaCandidatasBtt(validas,ctl.signal,[],[a,b]):validas;}
++  finally{clearTimeout(timer)}
++  if(gen!==altGeneracion)return;
++  if(!opciones.length)throw Error('No se pudieron comprobar las opciones BTT');
+   limpiaCapasAlternativas();lista.replaceChildren();lista.classList.remove('hidden');
+-  const colors=['#38bdf8','#ffad4a','#a3e66c'];
+-  let selected=0;const buttons=[];
+-  const choose=document.createElement('button');choose.type='button';choose.className='alternativaConfirmar';choose.textContent='Elegir ruta';
+-  const preview=i=>{selected=i;altCapas.forEach((l,j)=>{if(j===i){if(!map.hasLayer(l))l.addTo(map);}else if(map.hasLayer(l))map.removeLayer(l);});buttons.forEach((x,j)=>x.setAttribute('aria-pressed',String(i===j)));const dock=$('creadorDock');map.fitBounds(altCapas[i].getBounds(),{paddingTopLeft:[35,110],paddingBottomRight:[65,(dock?.offsetHeight||140)+25]});estado.textContent='Vista previa · '+(i?'Alternativa '+i:'Ruta principal');};
+-  for(let i=0;i<opciones.length;i++){
+-   const r=opciones[i],layer=L.polyline(r.parts[0].map(p=>p.slice(0,2)),{color:colors[i],weight:5,opacity:.8,interactive:false}).addTo(map);altCapas.push(layer);
+-   const button=document.createElement('button');button.type='button';button.className='alternativa';button.style.borderLeftColor=colors[i];
+-   const title=document.createElement('b');title.textContent=i?'Alternativa '+i:'Principal';const info=document.createElement('small');
++  const colores=['#38bdf8','#ffad4a','#a3e66c'];
++  const nombres=['Azul','Naranja','Verde'];
++  let selected=0;const botones=[];
++  const choose=document.createElement('button');choose.type='button';choose.className='alternativaConfirmar';
++  const preview=i=>{
++   selected=i;
++   altCapas.forEach((l,j)=>{if(j===i)l.addTo(map);else map.removeLayer(l)});
++   botones.forEach((x,j)=>x.setAttribute('aria-pressed',String(i===j)));
++   const aviso=textoRevisionBtt(opciones[i].revisionBtt);
++   estado.textContent='Ruta '+(i+1)+' de '+opciones.length+(opciones.length<3?' · solo '+opciones.length+(opciones.length===1?' opción distinta':' opciones distintas'):'')+(aviso?' · '+aviso:'');
++   estado.classList.toggle('aviso-btt',!!aviso);
++   choose.textContent=aviso?'Incluir ruta de todos modos':'Elegir ruta';
++   map.fitBounds(altCapas[i].getBounds(),{paddingTopLeft:[35,110],paddingBottomRight:[65,($('creadorDock')?.offsetHeight||140)+25]});
++  };
++  opciones.forEach((r,i)=>{
++   const trazado=L.polyline(r.parts[0].map(p=>p.slice(0,2)),{color:colores[i],weight:6,opacity:.9,interactive:false});
++   altCapas.push(L.featureGroup([trazado,...capaRampasBtt(r.revisionBtt)]));
++   const button=document.createElement('button');button.type='button';button.className='alternativa';
++   button.style.setProperty('--alt-color',colores[i]);
++   button.setAttribute('aria-label','Ruta '+(i+1)+' · '+nombres[i]);
++   const title=document.createElement('b');title.textContent=(i+1)+' · '+nombres[i];
++   const info=document.createElement('small');
+    info.textContent=(r.comparison.distance/1000).toFixed(2).replace('.',',')+' km'+(r.comparison.ascent===null?'':' · +'+Math.round(r.comparison.ascent)+' m');
+-   button.append(title,info);lista.append(button);buttons.push(button);
++   button.append(title,info);lista.append(button);botones.push(button);
+    button.onclick=()=>{if(!altControl&&gen===altGeneracion)preview(i);};
+-  }
+-  const cancel=document.createElement('button');cancel.type='button';cancel.className='alternativaCancelar';cancel.textContent='Cancelar';cancel.onclick=cancelaAlternativas;lista.append(cancel,choose);lista.classList.add('compact-preview');
+-  choose.onclick=async()=>{const r=opciones[selected];
+-    if(altControl||gen!==altGeneracion)return;
+-    if(drawPoints.length>1&&!confirm('¿Sustituir el borrador actual por este recorrido?'))return;
+-    altControl=ctl;lista.querySelectorAll('button:not(.alternativaCancelar)').forEach(x=>x.disabled=true);estado.textContent='Preparando recorrido y alturas…';
+-    const timer=setTimeout(()=>ctl.abort(),20000);
+-    try{await alturasTerrenoGps(r,ctl.signal);}catch(e){}finally{clearTimeout(timer)}
+-    if(gen!==altGeneracion)return;
+-    cancelaAlternativas();aplicaMapaGps(r);notice('Recorrido elegido. Puedes añadir puntos o editarlo.');
+-   };
++  });
++  const cancel=document.createElement('button');cancel.type='button';cancel.className='alternativaCancelar';cancel.textContent='Descartar';cancel.onclick=cancelaAlternativas;lista.append(cancel,choose);lista.classList.add('compact-preview');
++  choose.onclick=async()=>{
++   const r=opciones[selected];
++   if(altControl||gen!==altGeneracion)return;
++   if(drawPoints.length>1&&!confirm('¿Sustituir el borrador actual por este recorrido?'))return;
++   if(!r.revisionBtt){
++    const altura=new AbortController();altControl=altura;
++    lista.querySelectorAll('button:not(.alternativaCancelar)').forEach(x=>x.disabled=true);
++    estado.textContent='Preparando recorrido y alturas…';
++    const espera=setTimeout(()=>altura.abort(),20000);
++    try{await alturasTerrenoGps(r,altura.signal)}catch(e){}finally{clearTimeout(espera)}
++   }
++   if(gen!==altGeneracion)return;
++   cancelaAlternativas();aplicaMapaGps(r);
++   estadoMapaGps(textoRevisionBtt(r.revisionBtt));
++   notice('Recorrido elegido. Puedes añadir puntos o editarlo.');
++  };
+   preview(0);
+  }catch(e){if(gen===altGeneracion){estado.textContent=e.message+' · Vuelve a marcar los puntos';limpiaCapasAlternativas();altInicio=null;}}
+  finally{if(gen===altGeneracion)altControl=null;}
+@@ -56,6 +89,6 @@ if(typeof document!=='undefined'){
+   $('modoManual').onclick=cancelaAlternativas;
+   $('modoDosPuntos').onclick=()=>{if(calculandoMapaGps)return;cancelaAlternativas();altActivo=true;$('modoDosPuntos').setAttribute('aria-pressed','true');$('modoManual').setAttribute('aria-pressed','false');$('alternativasLista').classList.add('hidden');panel.classList.remove('hidden');$('alternativasEstado').textContent='Marca el inicio en el mapa';};
+   $('alternativasCerrar').onclick=cancelaAlternativas;
+-  $('alternativasActividad').onchange=()=>{cancelaAlternativas();cancelaMapaGps();};
++  $('alternativasActividad').onchange=()=>{cancelaAlternativas();cancelaMapaGps();estadoMapaGps('');updateElevation();};
+  }
+ }
+diff --git a/src/js/12-btt.js b/src/js/12-btt.js
+new file mode 100644
+index 0000000..83e5e98
+--- /dev/null
++++ b/src/js/12-btt.js
+@@ -0,0 +1,169 @@
++// El perfil del motor elige caminos. Aquí se comprueba además si la subida
++// es razonable para el modo BTT antes de añadirla o guardarla en el borrador.
++const VENTANA_BTT=200, PENDIENTE_BTT=25, HUECO_ALTURA_BTT=80;
++
++function rampasBtt(parts,firmes=[]){
++ const rows=[];
++ let total=0;
++ for(const part of parts)for(const p of part){
++  const prev=rows.at(-1);
++  if(prev){
++   const delta=metros2(prev.p,p);
++   if(delta<.01)continue;
++   total+=delta;
++  }
++  rows.push({d:total,p});
++ }
++ if(rows.length<2)return {tramos:[],alturaIncierta:true};
++ const alturaIncierta=rows.some((r,i)=>!Number.isFinite(r.p[2])||i>0&&r.d-rows[i-1].d>HUECO_ALTURA_BTT);
++ const tramos=[];
++ let i=0;
++ function mide(d){
++  while(i>0&&rows[i].d>d)i--;
++  while(i+1<rows.length-1&&rows[i+1].d<d)i++;
++  const a=rows[i],b=rows[i+1];
++  const f=(d-a.d)/(b.d-a.d);
++  const p=[a.p[0]+(b.p[0]-a.p[0])*f,a.p[1]+(b.p[1]-a.p[1])*f];
++  const h=f<=1e-6?a.p[2]:f>=1-1e-6?b.p[2]:b.d-a.d<=HUECO_ALTURA_BTT&&Number.isFinite(a.p[2])&&Number.isFinite(b.p[2])?a.p[2]+(b.p[2]-a.p[2])*f:null;
++  return {p,h};
++ }
++ if(total>=VENTANA_BTT){
++  const limite=total-VENTANA_BTT;
++  for(let desde=0;;desde=Math.min(limite,desde+20)){
++   const hasta=desde+VENTANA_BTT;
++   const cotas=[0,50,100,150,200].map(m=>mide(desde+m).h);
++   if(cotas.every(Number.isFinite)){
++    const pendiente=(cotas[4]-cotas[0])/VENTANA_BTT*100;
++    // Dos bloques de subida, para que un salto aislado de altura no baste.
++    const bloques=cotas.slice(1).filter((h,j)=>h-cotas[j]>=5).length;
++    const pavimentado=firmes.some(f=>f.desde<=desde&&f.hasta>=hasta);
++    if(pendiente>=PENDIENTE_BTT&&bloques>=2&&!pavimentado){
++     const anterior=tramos.at(-1);
++     if(anterior&&desde<=anterior.hasta){
++      anterior.hasta=hasta;
++      anterior.pendiente=Math.max(anterior.pendiente,pendiente);
++     }else tramos.push({desde,hasta,pendiente});
++    }
++   }
++   if(desde>=limite)break;
++  }
++ }
++ for(const t of tramos)t.puntos=[mide(t.desde).p,...rows.filter(r=>r.d>t.desde&&r.d<t.hasta).map(r=>r.p.slice(0,2)),mide(t.hasta).p];
++ return {tramos,alturaIncierta};
++}
++
++function firmeBtt(candidate){
++ const messages=candidate.terrain;
++ if(!Array.isArray(messages)||!Array.isArray(messages[0]))return [];
++ const header=messages[0],lng=header.indexOf('Longitude'),lat=header.indexOf('Latitude'),distance=header.indexOf('Distance'),tags=header.indexOf('WayTags');
++ if([lng,lat,distance,tags].some(k=>k<0))return [];
++ const points=candidate.parts[0],firmes=[];
++ let limite=0,indice=0,metros=0,prev=0;
++ for(const row of messages.slice(1)){
++  if(!Array.isArray(row)||!/^\d+$/.test(row[distance]))return [];
++  limite+=Number(row[distance]);
++  const fin=[Number(row[lat])/1e6,Number(row[lng])/1e6];
++  if(!fin.every(Number.isFinite))return [];
++  while(indice<points.length-1&&metros2(points[indice],fin)>4&&metros<limite+50){
++   metros+=metros2(points[indice],points[indice+1]);indice++;
++  }
++  if(metros2(points[indice],fin)>4||Math.abs(metros-limite)>Math.max(30,limite*.04))return [];
++  const tag=String(row[tags]||'');
++  const bueno=/\bsurface=(asphalt|paved|concrete|paving_stones)\b/.test(tag)&&!/\b(highway=steps|smoothness=(very_bad|horrible|very_horrible|impassable)|bicycle=(no|dismount))\b/.test(tag);
++  if(bueno&&metros>prev){
++   const ultimo=firmes.at(-1);
++   if(ultimo&&ultimo.hasta===prev)ultimo.hasta=metros;
++   else firmes.push({desde:prev,hasta:metros});
++  }
++  prev=metros;
++ }
++ return firmes;
++}
++
++function prefijoBtt(points,start){
++ if(points.length<2||metros2(points.at(-1),start)>3)return [];
++ let m=0,i=points.length-1;
++ while(i>0&&m<VENTANA_BTT){
++  m+=metros2(points[i],points[i-1]);i--;
++ }
++ return points.slice(i,-1);
++}
++
++async function revisaCandidatasBtt(candidates,signal,prefijo=[],extremos=null){
++ const revisadas=[];
++ for(const candidate of candidates){
++  if(signal.aborted)break;
++  const firmes=firmeBtt(candidate);
++  const revisar=()=>{
++   if(!prefijo.length)return rampasBtt(candidate.parts,firmes);
++   const inicio=[...prefijo,candidate.parts[0][0]];
++   const m=inicio.slice(1).reduce((sum,p,i)=>sum+metros2(inicio[i],p),0);
++   const revision=rampasBtt([prefijo,...candidate.parts],firmes.map(f=>({desde:f.desde+m,hasta:f.hasta+m})));
++   revision.tramos=revision.tramos.filter(t=>t.hasta>m);
++   return revision;
++  };
++  let revision=revisar();
++  if(revision.alturaIncierta){
++   try{await alturasTerrenoGps(candidate,signal)}catch(e){}
++   revision=revisar();
++  }
++  revisadas.push({...candidate,revisionBtt:revision});
++ }
++ const calidad=r=>r.revisionBtt.tramos.length?2:r.revisionBtt.alturaIncierta?1:0;
++ const ordena=(a,b)=>calidad(a)-calidad(b);
++ const rampas=revisadas.flatMap(r=>r.revisionBtt.tramos);
++ if(extremos&&rampas.length&&revisadas.some(r=>calidad(r)>0)&&!signal.aborted){
++  const motor=window.MallabiMotor;
++  try{
++   const [a,b]=extremos;
++   const centros=rampas.map(r=>r.puntos[Math.floor(r.puntos.length/2)]);
++   const vuelta=await motor.fetchBttDetour(a,b,centros,signal);
++   if(vuelta&&(!prefijo.length||metros2(a,vuelta.parts[0][0])<=3)){
++    vuelta.anchors=[vuelta.parts[0][0],vuelta.parts[0].at(-1)];
++    if(motor.validaAlternativa([a,b],vuelta)){
++     const extra=await revisaCandidatasBtt([vuelta],signal,prefijo);
++     const combinadas=[...revisadas,...extra].sort(ordena);
++     return motor.uniqueAlternatives(combinadas,a,b);
++    }
++   }
++  }catch(e){}
++ }
++ return revisadas.sort(ordena);
++}
++
++function textoRevisionBtt(revision,conKm=true){
++ if(!revision)return '';
++ const r=revision.tramos[0];
++ if(r)return 'Probable tramo a pie · rampa del '+Math.round(r.pendiente)+' %'+(conKm?' · desde el km '+(r.desde/1000).toFixed(2).replace('.',','):'')+(revision.tramos.length>1?' · '+revision.tramos.length+' rampas':'');
++ return revision.alturaIncierta?'BTT sin verificar · faltan alturas para comprobar la pendiente':'';
++}
++
++function capaRampasBtt(revision){
++ return revision?.tramos.map(r=>L.polyline(r.puntos,{color:'#ff6946',weight:9,dashArray:'9 7',interactive:false}))||[];
++}
++
++function confirmaTramoBtt(result,signal){
++ const texto=textoRevisionBtt(result.revisionBtt,false);
++ if(signal.aborted||!texto)return Promise.resolve(!signal.aborted);
++ const capas=capaRampasBtt(result.revisionBtt);
++ const vista=L.featureGroup(capas.length?capas:result.parts.map(p=>L.polyline(p,{color:'#ffad4a',weight:5,dashArray:'9 7',interactive:false}))).addTo(map);
++ map.fitBounds(vista.getBounds(),{padding:[55,90],maxZoom:17});
++ estadoMapaGps(texto+' · Elige si quieres añadir el tramo.');
++ const status=$('plannerStatus');
++ return new Promise(resolve=>{
++  const descarta=document.createElement('button'),incluye=document.createElement('button');
++  for(const b of [descarta,incluye]){b.type='button';b.className='une-recta'}
++  descarta.textContent='Descartar tramo';
++  incluye.textContent='Incluir tramo de todos modos';
++  const fin=acepta=>{
++   signal.removeEventListener('abort',cancela);
++   map.removeLayer(vista);descarta.remove();incluye.remove();resolve(acepta);
++  };
++  const cancela=()=>fin(false);
++  signal.addEventListener('abort',cancela,{once:true});
++  descarta.onclick=cancela;incluye.onclick=()=>fin(true);
++  status.append(descarta,incluye);
++ });
++}
++
++if(typeof module==='object'&&module&&module.exports)module.exports={rampasBtt,firmeBtt,revisaCandidatasBtt,textoRevisionBtt};
+diff --git a/src/nuevo.plantilla.html b/src/nuevo.plantilla.html
+index 363f008..004447d 100644
+--- a/src/nuevo.plantilla.html
++++ b/src/nuevo.plantilla.html
+@@ -675,7 +675,10 @@ body.despejado #compass b{font-size:22px}
+ #compass b small{font-size:.5em;font-weight:700;color:#94a3b8;margin-left:4px;letter-spacing:0}
+ @media (max-width:389px){body.despejado #compass svg{width:32px;height:32px}body.despejado #compass b{font-size:18px}}
+ #creadorModo{display:none}body.creating-route #creadorModo{display:flex;gap:4px;position:absolute;z-index:1001;bottom:calc(var(--create-profile-height,145px) + 72px);left:50%;transform:translateX(-50%);background:#102632;padding:4px;border-radius:12px;white-space:nowrap}#creadorModo button{font-size:12px;min-height:44px;padding:6px 10px;border-radius:9px}#creadorModo button[aria-pressed=true]{background:#7ce4e6;color:#102632}#alternativasPanel{position:absolute;z-index:1002;left:10px;right:10px;bottom:12px;max-height:48%;overflow:auto;background:#102632f5;border:1px solid #4a7580;border-radius:18px;padding:12px;color:#f1f8fa;box-shadow:0 5px 24px #0008}#alternativasPanel.hidden,#alternativasLista.hidden{display:none}#alternativasPanel header{display:flex;align-items:center;justify-content:space-between;gap:8px}#alternativasLista{display:grid;gap:7px;margin-top:8px}.alternativa{display:grid;text-align:left;gap:4px;border-left:5px solid;background:#183642;border-radius:12px;padding:10px;color:#f1f8fa}.alternativa small{font-size:12px;color:#c5e5eb}body:not(.creating-route) #alternativasPanel{display:none}
+-#creadorDock{display:none}body.creating-route #creadorDock{display:flex;flex-direction:column;gap:6px;position:absolute;z-index:1002;left:10px;right:10px;bottom:calc(var(--create-profile-height,145px) + 8px);padding:7px;background:#102632f5;border:1px solid #4a7580;border-radius:16px;box-shadow:0 5px 20px #0006;color:#f1f8fa}body.creating-route #creadorDock:has(#alternativasPanel:not(.hidden)){bottom:12px}body.creating-route #creadorModo{position:static;transform:none;display:flex;gap:6px;padding:0;background:none;white-space:normal}#creadorModo button{flex:1;min-width:0;background:#162e3b;color:#d6eef2;border:1px solid #41616e;font-weight:650}#creadorModo button[aria-pressed=true]{background:#173c46;color:#8cecef;border-color:#75dce0;box-shadow:inset 0 -2px #75dce0}#alternativasPanel{position:static;max-height:32vh;padding:4px 5px 2px;border:0;border-radius:0;box-shadow:none;background:none}#alternativasPanel header{font-size:14px;margin:0 0 5px}#alternativasCerrar{min-width:44px;min-height:44px;color:#d6eef2;background:#183642;border:1px solid #41616e;border-radius:10px}#alternativasPanel label{display:flex;align-items:center;gap:8px;font-size:13px}#alternativasActividad{flex:1;min-height:44px;background:#183642;color:#e7f6f8;border:1px solid #41616e;border-radius:9px;padding:4px 8px;font:inherit;color-scheme:dark}#alternativasEstado{font-size:14px;margin:7px 0 2px;color:#bde5e8}#alternativasLista{margin-top:5px;gap:5px}.alternativa{padding:7px 10px;min-height:44px}#alternativasPanel{max-height:none;overflow:visible;min-height:0}#creadorDock{box-sizing:border-box}#alternativasLista.compact-preview{display:flex;flex-wrap:wrap;gap:5px}#alternativasLista.compact-preview .alternativa{flex:1;min-width:0;text-align:center;border:1px solid #41616e;border-top:4px solid;border-top-color:var(--alt-color,#75dce0);padding:5px 2px;gap:2px;font-size:12px}#alternativasLista.compact-preview .alternativa:nth-child(1){border-top-color:#38bdf8}#alternativasLista.compact-preview .alternativa:nth-child(2){border-top-color:#ffad4a}#alternativasLista.compact-preview .alternativa:nth-child(3){border-top-color:#a3e66c}#alternativasLista.compact-preview .alternativa[aria-pressed=true]{background:#28505c;box-shadow:inset 0 0 0 1px #a9e5e8}#alternativasLista.compact-preview .alternativa small{font-size:11px}#alternativasLista .alternativaConfirmar{flex:0 0 100%;min-height:44px;background:#75dce0;color:#102632;font-weight:700;border-radius:9px}#creadorDock:has(.compact-preview) #creadorModo,#alternativasPanel:has(.compact-preview) header,#alternativasPanel:has(.compact-preview) label{display:none}#creadorActividad{display:flex;align-items:center;gap:8px;font-size:13px}#creadorActividad select{flex:1}#creadorDock:has(.compact-preview) #creadorActividad{display:none}#alternativasLista.compact-preview .alternativaConfirmar{flex:2 1 0}#alternativasLista.compact-preview .alternativaCancelar{flex:1 1 0;min-height:44px;background:#183642;color:#e7f6f8;border:1px solid #41616e;border-radius:9px;font-weight:650}#alternativasLista.compact-preview .alternativa{flex:1 1 28%}</style></head><body><div id="app">
++#creadorDock{display:none}body.creating-route #creadorDock{display:flex;flex-direction:column;gap:6px;position:absolute;z-index:1002;left:10px;right:10px;bottom:calc(var(--create-profile-height,145px) + 8px);padding:7px;background:#102632f5;border:1px solid #4a7580;border-radius:16px;box-shadow:0 5px 20px #0006;color:#f1f8fa}body.creating-route #creadorDock:has(#alternativasPanel:not(.hidden)){bottom:12px}body.creating-route #creadorModo{position:static;transform:none;display:flex;gap:6px;padding:0;background:none;white-space:normal}#creadorModo button{flex:1;min-width:0;background:#162e3b;color:#d6eef2;border:1px solid #41616e;font-weight:650}#creadorModo button[aria-pressed=true]{background:#173c46;color:#8cecef;border-color:#75dce0;box-shadow:inset 0 -2px #75dce0}#alternativasPanel{position:static;max-height:32vh;padding:4px 5px 2px;border:0;border-radius:0;box-shadow:none;background:none}#alternativasPanel header{font-size:14px;margin:0 0 5px}#alternativasCerrar{min-width:44px;min-height:44px;color:#d6eef2;background:#183642;border:1px solid #41616e;border-radius:10px}#alternativasPanel label{display:flex;align-items:center;gap:8px;font-size:13px}#alternativasActividad{flex:1;min-height:44px;background:#183642;color:#e7f6f8;border:1px solid #41616e;border-radius:9px;padding:4px 8px;font:inherit;color-scheme:dark}#alternativasEstado{font-size:14px;margin:7px 0 2px;color:#bde5e8}#alternativasLista{margin-top:5px;gap:5px}.alternativa{padding:7px 10px;min-height:44px}#alternativasPanel{max-height:none;overflow:visible;min-height:0}#creadorDock{box-sizing:border-box}#alternativasLista.compact-preview{display:flex;flex-wrap:wrap;gap:5px}#alternativasLista.compact-preview .alternativa{flex:1;min-width:0;text-align:center;border:1px solid #41616e;border-top:4px solid;border-top-color:var(--alt-color,#75dce0);padding:5px 2px;gap:2px;font-size:12px}#alternativasLista.compact-preview .alternativa:nth-child(1){border-top-color:#38bdf8}#alternativasLista.compact-preview .alternativa:nth-child(2){border-top-color:#ffad4a}#alternativasLista.compact-preview .alternativa:nth-child(3){border-top-color:#a3e66c}#alternativasLista.compact-preview .alternativa[aria-pressed=true]{background:#28505c;box-shadow:inset 0 0 0 1px #a9e5e8}#alternativasLista.compact-preview .alternativa small{font-size:11px}#alternativasLista .alternativaConfirmar{flex:0 0 100%;min-height:44px;background:#75dce0;color:#102632;font-weight:700;border-radius:9px}#creadorDock:has(.compact-preview) #creadorModo,#alternativasPanel:has(.compact-preview) header,#alternativasPanel:has(.compact-preview) label{display:none}#creadorActividad{display:flex;align-items:center;gap:8px;font-size:13px}#creadorActividad select{flex:1}#creadorDock:has(.compact-preview) #creadorActividad{display:none}#alternativasLista.compact-preview .alternativaConfirmar{flex:2 1 0}#alternativasLista.compact-preview .alternativaCancelar{flex:1 1 0;min-height:44px;background:#183642;color:#e7f6f8;border:1px solid #41616e;border-radius:9px;font-weight:650}#alternativasLista.compact-preview .alternativa{flex:1 1 28%}#alternativasEstado.aviso-btt{color:#ffc083;font-weight:700}
++#alternativasLista.compact-preview .alternativa{border-top-color:var(--alt-color,#75dce0)}
++#plannerStatus button + button{margin-left:5px}
++</style></head><body><div id="app">
+ <header class="top"><div><strong>TRABAKUTIK <span style="color:#70eaff">GPS</span></strong><small id="title">Elige una ruta</small></div><a href="https://trabakutik.com/">← Volver a la web</a></header>
+ <div id="map" aria-label="Mapa de todas las rutas"><div id="mapRot"></div><div id="creadorDock"><label id="creadorActividad">Actividad <select id="alternativasActividad"><option value="bike">BTT / e-bike</option><option value="foot">Senderismo</option><option value="car">Coche</option></select></label><div id="creadorModo"><button type="button" id="modoManual" aria-pressed="true">Punto a punto</button><button type="button" id="modoDosPuntos" aria-pressed="false">Inicio y destino</button></div><section id="alternativasPanel" class="hidden"><header><b>Elige tu recorrido</b><button type="button" id="alternativasCerrar" aria-label="Volver a punto a punto">✕</button></header><p id="alternativasEstado" role="status"></p><div id="alternativasLista" class="hidden"></div></section></div><div class="tools"><button id="eye" title="Mostrar rutas de Trabakutik" aria-label="Mostrar rutas de Trabakutik" aria-pressed="false"><svg viewBox="0 0 24 24" width="23" height="23" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m3 7 9-4 9 4-9 4-9-4Z"/><path d="m3 12 9 4 9-4M3 17l9 4 9-4"/></svg></button><button id="locate" title="Mi posición" aria-label="Centrar en mi posición">⌖</button><button id="orient" type="button" aria-pressed="true" title="Orientar el mapa" aria-label="Orientar el mapa: rumbo arriba o norte arriba"><svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 L16 20 L12 17 L8 20 Z"/></svg></button><button id="audioMode" type="button" data-modo="voz" aria-label="Avisos por voz y pitidos" title="Cambiar avisos sonoros"><svg id="audioIcon" viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/></svg></button><button id="pantallaCruces" type="button" aria-pressed="false" hidden data-modo="andando" title="Bici o senderismo" aria-label="Modo: senderismo. La pantalla no se enciende en los cruces"><svg id="iconoModo" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></svg></button><button id="sos" type="button" aria-label="Compartir coordenadas SOS" hidden>SOS</button><button id="guardaMapa" type="button" title="Guardar el mapa de esta ruta para andar sin cobertura" aria-label="Guardar el mapa de esta ruta"><small>mapa</small><b>⤓</b></button></div><button type="button" id="avisoMal" class="aviso-mal hidden"></button><button type="button" id="avisoFalta" class="aviso-mal aviso-falta hidden">✋ Faltó aquí</button><div id="turnHint" class="turn-hint hidden" role="status" aria-live="polite"><div class="turn-fila"><span id="turnArrow" class="turn-arrow"></span><span class="turn-copy"><b id="turnDirection">Gira a la derecha</b><small id="turnAngle">Giro de 78&deg;</small><span class="turn-dist"><em id="turnDistance">50</em><i>m</i></span></span></div><div class="turn-fases"><i></i><i></i></div><div class="turn-rot"><span id="turnRot1">50 m</span><span>en el cruce</span></div></div><div class="info"><div class="info-top"><button id="mapTitle" class="route-title-link" type="button" disabled title="Ficha de la ruta">Mapa de rutas</button><button id="clearActiveRoute" class="clear-active hidden" type="button" aria-label="Quitar ruta activa del mapa" title="Quitar ruta activa">×</button><label class="basemap-control"><span>Mapa</span><select id="basemap" aria-label="Elegir fondo de mapa"><option value="osm">OSM</option><option value="ign">IGN</option><option value="pnoa">Sat.</option></select></label></div><div id="gpsState" data-estado="inactivo">GPS sin iniciar</div><span id="compass" class="compass hidden"><svg viewBox="0 0 40 40" width="40" height="40" aria-hidden="true"><circle cx="20" cy="20" r="18" fill="#07202dcc" stroke="#4ba7bc" stroke-width="1.4"/><text x="20" y="9.4" text-anchor="middle" font-size="7.5" font-weight="800" fill="#8fd3e4">N</text><text x="20" y="36" text-anchor="middle" font-size="6.5" fill="#54818f">S</text><text x="35.2" y="22.6" text-anchor="middle" font-size="6.5" fill="#54818f">E</text><text x="4.8" y="22.6" text-anchor="middle" font-size="6.5" fill="#54818f">O</text><g id="compassNeedle" transform="rotate(0 20 20)"><path d="M20 3.5 L26 25 L20 21 L14 25 Z" fill="#ff9c3b" stroke="#020617" stroke-width="1.2" stroke-linejoin="round"/><circle cx="20" cy="20" r="2.1" fill="#07202d" stroke="#8ef0ff" stroke-width="1.1"/></g></svg><b id="compassText">—</b></span><span id="routeProgress" class="route-progress hidden"></span><span id="distance">Ruta destacada en cian</span><span id="backgroundRouteLegend" class="hidden">Naranja continua · e-bike / Verde discontinua · senderismo / Dos colores · mixta</span><span id="ffProxBox" class="ff"><span class="ff-lab">Próx. cruce</span><b id="ffProx">—</b></span><span id="ffTrackBox" class="ff"><span class="ff-lab">Al track</span><b id="ffTrack">—</b></span><span id="ffAltBox" class="ff"><span class="ff-lab">Altitud</span><b id="ffAlt">—</b></span><button type="button" id="simBanda" class="sim-banda hidden">▶ SIMULANDO · toca para parar</button><span id="reverseWarn" class="reverse-warn hidden">&#8646; La est&aacute;s haciendo AL REV&Eacute;S &middot; los giros van corregidos</span></div><div id="plannerStatus" class="hidden" role="status" aria-live="polite"></div><span class="on-map" id="drawTip" hidden>Toca las líneas para marcar puntos azules</span><div id="mapCredit"></div><div id="plannerCredit"><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a> · cálculo FOSSGIS · <a href="https://www.openstreetmap.org/fixthemap" target="_blank" rel="noopener">Corregir mapa</a></div></div>
+ <section id="tripBox" class="hidden" aria-label="Lo que llevas" aria-live="off"><div class="trip-nombre" id="tripRuta"></div><div class="trip-tres"><div class="trip-col"><h3>Distancia</h3><div class="trip-g"><span id="tripHecho"></span><small id="tripHechoU">km</small></div><div class="trip-p"><span id="tripQuedaTxt">quedan </span><b id="tripQueda"></b></div><div class="trip-pista"><i id="tripBarra"></i></div></div><div class="trip-col"><h3>Desnivel</h3><div class="trip-g" id="tripDesnivel" role="text"><span class="par"><span class="sube" aria-hidden="true">▲</span><span id="tripSubido"></span></span> <span class="par"><span class="baja" aria-hidden="true">▼</span><span id="tripBajado"></span></span></div><div class="trip-p">falta <b id="tripFalta"></b></div></div><div class="trip-col"><h3>Tiempo</h3><div class="trip-g" id="tripTiempo">—</div><div class="trip-p">en marcha<b id="tripAltitud" class="hidden"></b></div></div></div><div class="trip-perfil-caja"><svg id="tripPerfil" viewBox="0 0 300 48" preserveAspectRatio="none" aria-hidden="true"><defs><clipPath id="tripHechoClip"><path id="tripHechoRect" d=""/></clipPath></defs><path id="tripPerfilArea" fill="#4fd8f0" fill-opacity=".14"/><path id="tripPerfilHecho" fill="#4fd8f0" fill-opacity=".38" clip-path="url(#tripHechoClip)"/><path id="tripPerfilLinea" fill="none" stroke="#4fd8f0" stroke-width="2" vector-effect="non-scaling-stroke"/><circle id="tripPerfilPunto" r="0" fill="#1e7bf2" stroke="#fff" stroke-width="2" vector-effect="non-scaling-stroke"/></svg><div id="tripPerfilMarcas" aria-hidden="true"></div></div><div class="trip-botones"><button type="button" id="tripPausa" class="trip-proxy">❙❙ Pausa</button><button type="button" id="tripSigue" class="trip-proxy go hidden">▶ Seguir</button><button type="button" id="tripParar" class="trip-proxy red">■ Parar</button><button type="button" id="tripBloquea" class="trip-bloquea" aria-label="Bloquear la pantalla" title="Bloquear la pantalla: los toques no hacen nada hasta desbloquear">🔒</button><button id="despeja" class="despeja hidden" type="button" title="Mostrar u ocultar los mandos" aria-expanded="false">⌄ Ocultar</button></div></section>
