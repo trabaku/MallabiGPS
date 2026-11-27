@@ -673,7 +673,7 @@ index ced187e..2254373 100644
    System.out.println("PASS: un salto de la proyeccion no es dar la vuelta");System.out.println("PASS: el simulador pone la posicion encima de la ruta y para al acabarla");
    metricsChecks();
 diff --git a/src/js/07-servicio.js b/src/js/07-servicio.js
-index 8c7a03e..2b119cd 100644
+index 8c7a03e..8b1658f 100644
 --- a/src/js/07-servicio.js
 +++ b/src/js/07-servicio.js
 @@ -654,65 +654,6 @@ function conmutaModoAudio(){
@@ -742,6 +742,14 @@ index 8c7a03e..2b119cd 100644
  function getAudio(){try{if(!audio)audio=new (window.AudioContext||window.webkitAudioContext)();audio.resume().catch(()=>{})}catch(e){}}
  // Un grupo de n pitidos agudos, y el numero es el dato: 1 pitido = cruce a
  // 50 m, 2 = a 10 m, 3 = lo tienes encima, 4 = fuera de ruta. Los cuatro de
+@@ -759,6 +700,6 @@ function flechaGiro(deg,dir,tam,grosor){
+ // Para las pruebas: en la pagina «module» no existe y esto no hace nada. Su
+ // estado va con accesores: se lee y se escribe la variable de verdad.
+ if(typeof module==='object'&&module&&module.exports){
+- module.exports={pasoMarcas,textoFalta,pintaMarcasFalta,avisoSalida,altitudGps,pintaVersion,versionMayor,miraActualizacion,decideSentido,pintaBrujula,guiaIniciada,metrosGrabados,pintaAvance,clavePerfil,mismaClave,perfilDeAlturas,primeroDesde,alturaEnPerfil,nuevaCuenta,cuenta,recorrePerfil,subidaEntre,casaEnRuta,subidaSesion,pintaAlturas,marcaAlReves,resetOffRoute,updateOffRoute,formatoTiempo,avisaModoAudioNativo,pintaModoAudio,hablarGiro,hablar,hablaPagina,vuelvePagALaRuta,avisaSinGps,vuelveElGps,conmutaModoAudio,conmutaPantallaCruces,pintaPantallaCruces,getAudio,flechaGiro};
++ module.exports={pasoMarcas,textoFalta,pintaMarcasFalta,avisoSalida,altitudGps,pintaVersion,versionMayor,miraActualizacion,decideSentido,pintaBrujula,guiaIniciada,metrosGrabados,pintaAvance,clavePerfil,mismaClave,perfilDeAlturas,primeroDesde,alturaEnPerfil,nuevaCuenta,cuenta,recorrePerfil,subidaEntre,casaEnRuta,subidaSesion,pintaAlturas,marcaAlReves,resetOffRoute,updateOffRoute,formatoTiempo,avisaModoAudioNativo,pintaModoAudio,hablarGiro,hablar,hablaPagina,vuelvePagALaRuta,avisaSinGps,vuelveElGps,conmutaModoAudio,getAudio,flechaGiro};
+  Object.defineProperties(module.exports,{altGpsNativa:{get:()=>altGpsNativa,set:v=>{altGpsNativa=v},enumerable:true},rumboSuave:{get:()=>rumboSuave,set:v=>{rumboSuave=v},enumerable:true},textoFuera:{get:()=>textoFuera,set:v=>{textoFuera=v},enumerable:true},sentidoRuta:{get:()=>sentidoRuta,set:v=>{sentidoRuta=v},enumerable:true},refAvance:{get:()=>refAvance,set:v=>{refAvance=v},enumerable:true},refAvanceT:{get:()=>refAvanceT,set:v=>{refAvanceT=v},enumerable:true},alongPrevio:{get:()=>alongPrevio,set:v=>{alongPrevio=v},enumerable:true},alongAcum:{get:()=>alongAcum,set:v=>{alongAcum=v},enumerable:true},ultimoAlong:{get:()=>ultimoAlong,set:v=>{ultimoAlong=v},enumerable:true},ultimoPuntoAlong:{get:()=>ultimoPuntoAlong,set:v=>{ultimoPuntoAlong=v},enumerable:true},cortesGrabacion:{get:()=>cortesGrabacion,set:v=>{cortesGrabacion=v},enumerable:true},nativeTrackComplete:{get:()=>nativeTrackComplete,set:v=>{nativeTrackComplete=v},enumerable:true},anguloBrujula:{get:()=>anguloBrujula,set:v=>{anguloBrujula=v},enumerable:true},anguloFlecha:{get:()=>anguloFlecha,set:v=>{anguloFlecha=v},enumerable:true},metrosAndados:{get:()=>metrosAndados,set:v=>{metrosAndados=v},enumerable:true},enRutaUltimo:{get:()=>enRutaUltimo,set:v=>{enRutaUltimo=v},enumerable:true},perfilTrip:{get:()=>perfilTrip,set:v=>{perfilTrip=v},enumerable:true},subSes:{get:()=>subSes,set:v=>{subSes=v},enumerable:true},baroNativo:{get:()=>baroNativo,set:v=>{baroNativo=v},enumerable:true},sinGpsAvisado:{get:()=>sinGpsAvisado,set:v=>{sinGpsAvisado=v},enumerable:true},entradaAvisada:{get:()=>entradaAvisada,set:v=>{entradaAvisada=v},enumerable:true},tiempoMovNativo:{get:()=>tiempoMovNativo,set:v=>{tiempoMovNativo=v},enumerable:true}});
+ }
 diff --git a/src/js/10-aplicacion.js b/src/js/10-aplicacion.js
 index 62f775a..c0bfac0 100644
 --- a/src/js/10-aplicacion.js
