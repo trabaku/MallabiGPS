@@ -11,6 +11,17 @@ index 8773a4b..1dc10e1 100644
   compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
   // Firma independiente de MallabiGPS, nunca la del navegador antiguo.
   val llaveFija = rootProject.file("firma/mallabi.p12")
+diff --git a/engine-mallabi/tests/activity-109.test.cjs b/engine-mallabi/tests/activity-109.test.cjs
+index 1399c66..45b9bd4 100644
+--- a/engine-mallabi/tests/activity-109.test.cjs
++++ b/engine-mallabi/tests/activity-109.test.cjs
+@@ -5,5 +5,5 @@ const creator=fs.readFileSync(path.join(root,'src/js/05-creador-tramos.js'),'utf
+ const html=fs.readFileSync(path.join(root,'src/nuevo.plantilla.html'),'utf8');
+ const ui=fs.readFileSync(path.join(root,'src/js/11-alternativas.js'),'utf8');
+ test('BTT no solicita OSRM como alternativa',()=>assert.match(app,/if\(mode!=='bike'\)primary.push\(attempt\('OSRM'/));
+-test('BTT manual usa perfil ciclista y no fallback peatonal',()=>{assert.match(creator,/fetchAlternatives\(from,coords\[i\],actividad,signal\)/);assert.match(creator,/e.calzadaDudosa=true;throw e/);});
++test('Coche punto a punto usa perfil de coche y no fallback peatonal',()=>{assert.match(creator,/fetchAlternatives\(from,coords\[i\],'car',signal\)/);assert.match(creator,/e.calzadaDudosa=true;throw e/);});
+ test('actividad visible en el creador único y cancelar vista previa',()=>{assert.match(html,/id="creadorDock"><label id="creadorActividad"/);assert.match(ui,/cancel.onclick=cancelaAlternativas/);});
 diff --git a/engine-mallabi/tests/btt-rampas.test.cjs b/engine-mallabi/tests/btt-rampas.test.cjs
 deleted file mode 100644
 index 4c93305..0000000
