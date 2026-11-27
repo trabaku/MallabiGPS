@@ -1,0 +1,550 @@
+diff --git a/android/app/build.gradle.kts b/android/app/build.gradle.kts
+index 8773a4b..1dc10e1 100644
+--- a/android/app/build.gradle.kts
++++ b/android/app/build.gradle.kts
+@@ -2,7 +2,7 @@ plugins { id("com.android.application") }
+ android {
+  namespace = "com.trabakutik.gps"
+  compileSdk = 35
+- defaultConfig { applicationId = "com.trabakutik.mallabigps"; minSdk = 26; targetSdk = 35; versionCode = 158; versionName = "1.0.14" }
++ defaultConfig { applicationId = "com.trabakutik.mallabigps"; minSdk = 26; targetSdk = 35; versionCode = 159; versionName = "1.0.15" }
+  compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+  // Firma independiente de MallabiGPS, nunca la del navegador antiguo.
+  val llaveFija = rootProject.file("firma/mallabi.p12")
+diff --git a/engine-mallabi/tests/btt-rampas.test.cjs b/engine-mallabi/tests/btt-rampas.test.cjs
+deleted file mode 100644
+index 4c93305..0000000
+--- a/engine-mallabi/tests/btt-rampas.test.cjs
++++ /dev/null
+@@ -1,52 +0,0 @@
+-const test=require('node:test');
+-const assert=require('node:assert/strict');
+-const fs=require('node:fs');
+-const vm=require('node:vm');
+-const path=require('node:path');
+-
+-const root=path.resolve(__dirname,'../..');
+-const creator=fs.readFileSync(path.join(root,'src/js/05-creador-tramos.js'),'utf8');
+-const btt=fs.readFileSync(path.join(root,'src/js/12-btt.js'),'utf8');
+-const ctx=vm.createContext({module:{exports:{}},alturasTerrenoGps:async()=>{}});
+-vm.runInContext(creator.split('\n').find(l=>l.startsWith('function metros2('))+'\n'+btt,ctx);
+-const {rampasBtt,revisaCandidatasBtt,firmeBtt,textoRevisionBtt}=ctx.module.exports;
+-const puntos=(pendiente,base=0)=>Array.from({length:26},(_,i)=>[43+i*20/111195,-2.5,base+i*20*pendiente]);
+-const candidato=(points,mode='bike')=>({parts:[points],mode});
+-
+-test('sustained steep ascent requires confirmation and gives a segment to draw',()=>{
+- const check=rampasBtt([puntos(.31)]);
+- assert.equal(check.alturaIncierta,false);
+- assert.equal(check.tramos.length,1);
+- assert.equal(Math.round(check.tramos[0].pendiente),31);
+- assert(check.tramos[0].puntos.length>4);
+- assert.match(textoRevisionBtt(check),/Probable tramo a pie/);
+-});
+-test('descending, paved and isolated spikes do not create the loose-terrain warning',()=>{
+- const arriba=puntos(.31);
+- assert.equal(rampasBtt([arriba.toReversed()]).tramos.length,0);
+- assert.equal(rampasBtt([arriba],[{desde:0,hasta:501}]).tramos.length,0);
+- const spike=puntos(0);
+- spike[10][2]=70;
+- assert.equal(rampasBtt([spike]).tramos.length,0);
+-});
+-test('uncertain elevation is kept behind alternatives with known acceptable elevation',async()=>{
+- const peligrosa=candidato(puntos(.31)), buena=candidato(puntos(.10));
+- const dudosa=candidato(puntos(.10).map(p=>[p[0],p[1],null]));
+- const ordered=await revisaCandidatasBtt([peligrosa,dudosa,buena],new AbortController().signal);
+- assert.deepEqual(Array.from(ordered,x=>x.parts),[buena.parts,dudosa.parts,peligrosa.parts]);
+- assert.match(textoRevisionBtt(ordered[1].revisionBtt),/faltan alturas/);
+-});
+-test('the ramp across two short legs is still detected',async()=>{
+- const points=puntos(.31).slice(0,12), anterior=points.slice(0,6), nueva=points.slice(6);
+- assert.equal(rampasBtt([nueva]).tramos.length,0);
+- const checked=await revisaCandidatasBtt([candidato(nueva)],new AbortController().signal,anterior);
+- assert.equal(checked[0].revisionBtt.tramos.length,1);
+-});
+-test('only matched BRouter rows with good pavement exempt a steep section',()=>{
+- const points=puntos(.31), end=points.at(-1);
+- const header=['Longitude','Latitude','Elevation','Distance','WayTags'];
+- const row=[Math.round(end[1]*1e6),Math.round(end[0]*1e6),155,500,'highway=track surface=asphalt'];
+- assert.equal(firmeBtt({...candidato(points),terrain:[header,row]}).length,1);
+- assert.equal(firmeBtt({...candidato(points),terrain:[header,[...row.slice(0,4),'surface=asphalt smoothness=horrible']]}).length,0);
+- assert.equal(firmeBtt({...candidato(points),terrain:[header,[0,...row.slice(1)]]}).length,0);
+-});
+diff --git a/scripts/test-browser.cjs b/scripts/test-browser.cjs
+index 0beffc5..8321eb3 100644
+--- a/scripts/test-browser.cjs
++++ b/scripts/test-browser.cjs
+@@ -563,7 +563,10 @@ async function setup(context) {
+     await buscador.waitForFunction(()=>/No hay rutas publicadas en esta zona/.test(document.querySelector('#items').textContent));
+     await buscador.locator('[data-scope="all"]').click();
+     assert(await buscador.locator('#items .routeitem').count()>0,'Todas recupera el catálogo fuera de la zona');
+-    await buscador.keyboard.press('Escape');
++    const publicadaBtt=buscador.locator('#items .routeitem').filter({hasText:'E-bike'}).first();
++    await publicadaBtt.click();
++    await buscador.waitForFunction(()=>window.__creator.routePoints.length>1);
++    assert(await buscador.locator('#recordStart').isVisible(),'la ruta BTT publicada se puede navegar');
+     await buscador.getByRole('button',{name:/Crear ruta/}).click();
+     assert(await buscador.locator('body').evaluate(el=>el.classList.contains('creating-route')));
+     assert(await buscador.locator('#routeDialog').isHidden());
+@@ -653,15 +656,18 @@ async function setup(context) {
+     await opciones.goto(base+'nuevo.html');
+     await opciones.click('#crearDesdeRuta');
+     await opciones.waitForFunction(()=>window.__creator?.redGps);
++    assert.deepEqual(await opciones.locator('#alternativasActividad option').evaluateAll(
++      options=>options.map(option=>[option.value,option.textContent])),
++      [['foot','Senderismo'],['car','Coche']]);
++    assert.equal(await opciones.locator('#alternativasActividad').inputValue(),'foot');
+     await opciones.evaluate(()=>{
+-      window.MallabiMotor.fetchBttDetour=async()=>null;
+       window.MallabiMotor.fetchAlternatives=async(a,b,mode)=>{
+-        return (window.__soloRampa?[1]:[1,0,-1]).map(lado=>{
++        return [1,0,-1].map(lado=>{
+           const points=Array.from({length:21},(_,i)=>{
+             const f=i/20;
+-            return [a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f+lado*.0004*Math.sin(Math.PI*f),100+(lado===1?170:28)*f];
++            return [a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f+lado*.0004*Math.sin(Math.PI*f),100+28*f];
+           });
+-          return {mode,provider:'BRouter',parts:[points],comparison:{distance:555,ascent:lado===1?170:28}};
++          return {mode,provider:mode==='car'?'OSRM':'Valhalla',parts:[points],comparison:{distance:555,ascent:28}};
+         });
+       };
+       window.__toques=()=>{
+@@ -670,19 +676,14 @@ async function setup(context) {
+         map.fire('click',{latlng:L.latLng(43.015,-2.01)});
+       };
+     });
+-    for(const mode of ['bike','foot','car']){
++    for(const mode of ['foot','car']){
+       await opciones.locator('#alternativasActividad').selectOption(mode);
+       await opciones.click('#modoDosPuntos');
+       await opciones.evaluate(()=>window.__toques());
+       const colors=opciones.locator('#alternativasLista .alternativa');
+       await colors.nth(2).waitFor();
+       assert.equal(await colors.count(),3);
+-      if(mode==='bike')assert.doesNotMatch(await opciones.locator('#alternativasEstado').textContent(),/Probable tramo a pie/);
+       await colors.nth(2).click();
+-      if(mode==='bike'){
+-        assert.match(await opciones.locator('#alternativasEstado').textContent(),/Probable tramo a pie/);
+-        assert(await opciones.getByRole('button',{name:'Incluir ruta de todos modos'}).isVisible());
+-      }
+       for(const viewport of [{width:320,height:740},{width:360,height:800},{width:740,height:360}]){
+         await opciones.setViewportSize(viewport);
+         const layout=await opciones.locator('#alternativasLista').evaluate(lista=>{
+@@ -706,21 +707,11 @@ async function setup(context) {
+       await opciones.getByRole('button',{name:'Descartar',exact:true}).click();
+       assert.equal(await opciones.evaluate(()=>window.__creator.drawPoints.length),0);
+     }
+-    await opciones.locator('#alternativasActividad').selectOption('bike');
+-    await opciones.evaluate(()=>window.__creator.map.setView([43.015,-2.01],17,{animate:false}));
+-    await opciones.evaluate(()=>{window.__soloRampa=true;window.__toques()});
+-    await opciones.getByRole('button',{name:'Descartar tramo'}).waitFor();
+-    assert.equal(await opciones.evaluate(()=>window.__creator.map.getZoom()),17,'el aviso conserva el zoom del editor');
+-    assert.match(await opciones.locator('#plannerStatus').textContent(),/Probable tramo a pie/);
+-    assert.equal(await opciones.evaluate(()=>window.__creator.anclasGps.length),1);
+-    await opciones.getByRole('button',{name:'Descartar tramo'}).click();
+-    assert.equal(await opciones.evaluate(()=>window.__creator.anclasGps.length),1);
+-    await opciones.evaluate(()=>window.__creator.map.fire('click',{latlng:L.latLng(43.015,-2.01)}));
+-    await opciones.getByRole('button',{name:'Incluir tramo de todos modos'}).click();
++    await opciones.evaluate(()=>window.__toques());
+     await opciones.waitForFunction(()=>window.__creator.anclasGps.length===2);
+-    assert.equal(await opciones.locator('#creaTiempo').textContent(),'BTT / e-bike');
++    assert.equal(await opciones.locator('#creaTiempo').textContent(),'Coche');
+     await opciones.close();
+-    console.log('PASS Chromium: tres colores en BTT, Senderismo y Coche; filtro y descarte de rampas en ambos modos');
++    console.log('PASS Chromium: creación solo en Senderismo y Coche, con tres alternativas y edición punto a punto');
+     failPlanner=true;
+     await creator.evaluate(()=>window.__creator.map.fire('click',{latlng:L.latLng(43.0108,-2.0103)}));
+     // Aqui no hay red, asi que los caminos de la zona tampoco se han podido
+diff --git a/src/js/05-creador-tramos.js b/src/js/05-creador-tramos.js
+index f09cd9a..f49e55d 100644
+--- a/src/js/05-creador-tramos.js
++++ b/src/js/05-creador-tramos.js
+@@ -268,31 +268,23 @@ function mismaCalzada(pedido,pegado,rumbo){
+  const lado=-norte*Math.sin(r)+este*Math.cos(r);
+  return Math.abs(avance)<=CALZADA_AVANCE_M&&Math.abs(lado)<=CALZADA_LADO_M;
+ }
+-async function solicitaMapaGps(coords,signal,prefijo=[]){
++async function solicitaMapaGps(coords,signal){
+  const actividad=typeof document!=='undefined'&&document.getElementById?.('alternativasActividad')?.value;
+- if((actividad==='bike'||actividad==='car')&&typeof window!=='undefined'&&window.MallabiMotor?.fetchAlternatives){
+-  const parts=[],tramos=[];
+-  let alturaIncierta=false;
++ if(actividad==='car'&&typeof window!=='undefined'&&window.MallabiMotor?.fetchAlternatives){
++  const parts=[];
+   try{
+    for(let i=1;i<coords.length;i++){
+     if(signal.aborted)throw Error('Cálculo cancelado');
+     const from=parts.length?parts.at(-1).at(-1):coords[i-1];
+-    const opciones=(await window.MallabiMotor.fetchAlternatives(from,coords[i],actividad,signal))
+-      .filter(r=>r.mode===actividad&&(!parts.length||dist(from,r.parts[0][0])<=2)&&
+-        window.MallabiMotor.validaAlternativa([from,coords[i]],{parts:r.parts,anchors:[r.parts[0][0],r.parts[0].at(-1)]}));
+-    const candidatas=actividad==='bike'?await revisaCandidatasBtt(opciones,signal,i===1?prefijo:[],[from,coords[i]]):opciones;
++    const opciones=await window.MallabiMotor.fetchAlternatives(from,coords[i],'car',signal);
+     if(signal.aborted)throw Error('Cálculo cancelado');
+-    const chosen=candidatas[0];
+-    if(!chosen)throw Error(actividad==='bike'?'No se encontró un camino BTT compatible':'No se encontró una ruta para coche');
+-    parts.push(chosen.parts[0]);
+-    if(chosen.revisionBtt){
+-     tramos.push(...chosen.revisionBtt.tramos);
+-     alturaIncierta=alturaIncierta||chosen.revisionBtt.alturaIncierta;
+-    }
++    const elegida=opciones.find(r=>r.mode==='car'&&(!parts.length||dist(from,r.parts[0][0])<=2)&&
++      window.MallabiMotor.validaAlternativa([from,coords[i]],{parts:r.parts,anchors:[r.parts[0][0],r.parts[0].at(-1)]}));
++    if(!elegida)throw Error('No se encontró una ruta para coche');
++    parts.push(elegida.parts[0]);
+    }
+-   const result={anchors:[parts[0][0],...parts.map(p=>p.at(-1))],parts,provider:actividad==='bike'?'BTT':'Coche'};
++   const result={anchors:[parts[0][0],...parts.map(p=>p.at(-1))],parts,provider:'Coche'};
+    if(!window.MallabiMotor.validaAlternativa(coords,result))throw Error('Recorrido discontinuo');
+-   if(actividad==='bike')result.revisionBtt={tramos,alturaIncierta};
+    return result;
+   }catch(e){e.calzadaDudosa=true;throw e;}
+  }
+@@ -531,17 +523,13 @@ async function planificaTramoMapa(desde,hasta){
+  const timer=setTimeout(()=>controller.abort(),30000);
+  try{
+   {const espera=esperaRotondas([desde,hasta]);if(espera)await espera}
+-  const result=await solicitaMapaGps([desde,hasta],controller.signal,
+-    typeof prefijoBtt==='function'?prefijoBtt(drawPoints,desde):[]);
++  const result=await solicitaMapaGps([desde,hasta],controller.signal);
++  if(version!==calculoMapaGps)return;
++  try{await alturasTerrenoGps(result,controller.signal);}catch(e){}
+   if(version!==calculoMapaGps)return;
+-  if(result.revisionBtt){
+-   clearTimeout(timer);
+-   if(!await confirmaTramoBtt(result,controller.signal)){if(version===calculoMapaGps)estadoMapaGps('Tramo descartado · se conserva el recorrido anterior.');return;}
+-  }else try{await alturasTerrenoGps(result,controller.signal);}catch(e){}
+-  if(version!==calculoMapaGps||result.revisionBtt&&controller.signal.aborted)return;
+   anadeTramoMapa(result);
+   const completo=result.parts.every(part=>part.every(q=>Number.isFinite(q[2])));
+-  estadoMapaGps(result.revisionBtt?textoRevisionBtt(result.revisionBtt,false):completo?'':'Faltan alturas en este tramo.');
++  estadoMapaGps(completo?'':'Faltan alturas en este tramo.');
+  }catch(e){
+   if(version!==calculoMapaGps)return;
+   // Sin cobertura, con los caminos guardados. Sin desnivel: las cotas las
+@@ -578,12 +566,6 @@ async function planificaMapaGps(coords){
+   {const espera=esperaRotondas(coords);if(espera)await espera}
+   const result=await solicitaMapaGps(coords,controller.signal);
+   if(version!==calculoMapaGps)return;
+-  if(result.revisionBtt){
+-   clearTimeout(timer);
+-   if(!await confirmaTramoBtt(result,controller.signal)){if(version===calculoMapaGps)estadoMapaGps('Recorrido descartado.');return;}
+-   if(version!==calculoMapaGps||controller.signal.aborted)return;
+-   aplicaMapaGps(result);estadoMapaGps(textoRevisionBtt(result.revisionBtt));return;
+-  }
+   aplicaMapaGps(result);$('saveCreated').disabled=true;estadoMapaGps('Calculando desnivel…');
+   try{
+    await alturasTerrenoGps(result,controller.signal);
+@@ -1004,10 +986,9 @@ function pintaCreaResumen(m,sube,baja,conDesnivel,msMide,parcial,pendMax,duros){
+  if(typeof $!=='function'||!$('creaTiempo'))return;
+  if(!(m>=50)){$('creaTiempo').textContent='—';$('creaEsfuerzo').textContent='';return}
+  const actividad=$('alternativasActividad')?.value;
+- if(actividad==='bike'||actividad==='car'){
+-  $('creaTiempo').textContent=actividad==='bike'?'BTT / e-bike':'Coche';
+-  $('creaEsfuerzo').textContent=actividad==='bike'&&pendMax>=25
+-   ?'Rampa fuerte · hasta '+Math.round(pendMax)+' % en el último tramo':'';
++ if(actividad==='car'){
++  $('creaTiempo').textContent='Coche';
++  $('creaEsfuerzo').textContent='';
+   return;
+  }
+  if(!conDesnivel){$('creaTiempo').innerHTML='≈ '+textoHoras(tiempoMIDE(m,0,0))+' <small>andando · sin datos de desnivel</small>';$('creaEsfuerzo').textContent='';return}
+diff --git a/src/js/06-creador-formas.js b/src/js/06-creador-formas.js
+index 27ed262..111f2fa 100644
+--- a/src/js/06-creador-formas.js
++++ b/src/js/06-creador-formas.js
+@@ -92,9 +92,7 @@ async function mueveAnclaMapa(i,lat,lon){
+    try{
+     r=await solicitaMapaGps([a,b],controller.signal);
+     if(version!==calculoMapaGps)return;
+-    if(r.revisionBtt){
+-     if(!await confirmaTramoBtt(r,controller.signal)){if(version===calculoMapaGps)estadoMapaGps('Punto sin mover · tramo descartado.');return;}
+-    }else try{await alturasTerrenoGps(r,controller.signal)}catch(e){}
++    try{await alturasTerrenoGps(r,controller.signal)}catch(e){}
+    }catch(e){
+     if(version!==calculoMapaGps)return;
+     r=e.calzadaDudosa?null:planLocalMapa([a,b]);
+diff --git a/src/js/11-alternativas.js b/src/js/11-alternativas.js
+index 234731a..77bb537 100644
+--- a/src/js/11-alternativas.js
++++ b/src/js/11-alternativas.js
+@@ -1,7 +1,7 @@
+ // Un solo creador. Las alternativas son una vista previa, no un borrador.
+ let altInicio=null,altActivo=false,altGeneracion=0,altCapas=[],altControl=null;
+ function limpiaCapasAlternativas(){altCapas.forEach(l=>map.removeLayer(l));altCapas=[];}
+-function cancelaAlternativas(){ $('alternativasEstado').classList.remove('aviso-btt');altGeneracion++;altActivo=false;altInicio=null;if(altControl)altControl.abort();altControl=null;limpiaCapasAlternativas();$('alternativasPanel').classList.add('hidden');$('alternativasLista').replaceChildren();$('alternativasLista').classList.remove('compact-preview');$('modoDosPuntos').setAttribute('aria-pressed','false');$('modoManual').setAttribute('aria-pressed','true');}
++function cancelaAlternativas(){ altGeneracion++;altActivo=false;altInicio=null;if(altControl)altControl.abort();altControl=null;limpiaCapasAlternativas();$('alternativasPanel').classList.add('hidden');$('alternativasLista').replaceChildren();$('alternativasLista').classList.remove('compact-preview');$('modoDosPuntos').setAttribute('aria-pressed','false');$('modoManual').setAttribute('aria-pressed','true');}
+ function capturaAlternativas(e){
+  if(!altActivo)return false;
+  if(!redGps){notice('Preparando caminos…');return true;}
+@@ -13,46 +13,36 @@ function capturaAlternativas(e){
+ }
+ async function calculaAlternativas(a,b){
+  const tipo=$('alternativasActividad').value;
+- const servicios=tipo==='bike'?'Valhalla y BRouter':'Valhalla y OSRM';
+- if(!confirm('Los puntos se enviarán a '+servicios+' para calcular las rutas. ¿Continuar?')){cancelaAlternativas();return;}
++ if(tipo!=='foot'&&tipo!=='car')return;
++ if(!confirm('Los puntos se enviarán a Valhalla y OSRM para calcular las rutas. ¿Continuar?')){cancelaAlternativas();return;}
+  const gen=++altGeneracion,ctl=new AbortController();altControl=ctl;
+  const estado=$('alternativasEstado'),lista=$('alternativasLista');
+  estado.textContent='Buscando hasta 3 recorridos distintos…';
+  try{
+   const raw=await window.MallabiMotor.fetchAlternatives(a,b,tipo,ctl.signal);
+   if(gen!==altGeneracion)return;
+-  const validas=raw.map(r=>{
++  const opciones=raw.map(r=>{
+    const parts=r.parts.map(p=>p.map(q=>q.slice()));
+    return {...r,parts,anchors:[parts[0][0],parts[0].at(-1)]};
+   }).filter(r=>r.mode===tipo&&window.MallabiMotor.validaAlternativa([a,b],r));
+-  if(!validas.length)throw Error('No hay recorridos válidos entre los dos puntos');
+-  if(tipo==='bike')estado.textContent='Comprobando pendientes y firme de las opciones BTT…';
+-  const timer=setTimeout(()=>ctl.abort(),22000);
+-  let opciones;
+-  try{opciones=tipo==='bike'?await revisaCandidatasBtt(validas,ctl.signal,[],[a,b]):validas;}
+-  finally{clearTimeout(timer)}
+-  if(gen!==altGeneracion)return;
+-  if(!opciones.length)throw Error('No se pudieron comprobar las opciones BTT');
++  if(!opciones.length)throw Error('No hay recorridos válidos entre los dos puntos');
+   limpiaCapasAlternativas();lista.replaceChildren();lista.classList.remove('hidden');
+   const colores=['#38bdf8','#ffad4a','#a3e66c'];
+   const nombres=['Azul','Naranja','Verde'];
+   let selected=0;const botones=[];
+   const comparacion=document.createElement('div');comparacion.className='alternativaOpciones';
+   const acciones=document.createElement('div');acciones.className='alternativaAcciones';
+-  const choose=document.createElement('button');choose.type='button';choose.className='alternativaConfirmar';
++  const choose=document.createElement('button');choose.type='button';choose.className='alternativaConfirmar';choose.textContent='Elegir ruta';
+   const preview=i=>{
+    selected=i;
+    altCapas.forEach((l,j)=>{if(j===i)l.addTo(map);else map.removeLayer(l)});
+    botones.forEach((x,j)=>x.setAttribute('aria-pressed',String(i===j)));
+-   const aviso=textoRevisionBtt(opciones[i].revisionBtt);
+-   estado.textContent='Ruta '+(i+1)+' de '+opciones.length+(opciones.length<3?' · solo '+opciones.length+(opciones.length===1?' opción distinta':' opciones distintas'):'')+(aviso?' · '+aviso:'');
+-   estado.classList.toggle('aviso-btt',!!aviso);
+-   choose.textContent=aviso?'Incluir ruta de todos modos':'Elegir ruta';
++   estado.textContent='Ruta '+(i+1)+' de '+opciones.length+(opciones.length<3?' · solo '+opciones.length+(opciones.length===1?' opción distinta':' opciones distintas'):'');
+    map.fitBounds(altCapas[i].getBounds(),{paddingTopLeft:[35,110],paddingBottomRight:[65,($('creadorDock')?.offsetHeight||140)+25]});
+   };
+   opciones.forEach((r,i)=>{
+    const trazado=L.polyline(r.parts[0].map(p=>p.slice(0,2)),{color:colores[i],weight:6,opacity:.9,interactive:false});
+-   altCapas.push(L.featureGroup([trazado,...capaRampasBtt(r.revisionBtt)]));
++   altCapas.push(trazado);
+    const button=document.createElement('button');button.type='button';button.className='alternativa';
+    button.style.setProperty('--alt-color',colores[i]);
+    button.setAttribute('aria-label','Ruta '+(i+1)+' · '+nombres[i]);
+@@ -69,16 +59,14 @@ async function calculaAlternativas(a,b){
+    const r=opciones[selected];
+    if(altControl||gen!==altGeneracion)return;
+    if(drawPoints.length>1&&!confirm('¿Sustituir el borrador actual por este recorrido?'))return;
+-   if(!r.revisionBtt){
+-    const altura=new AbortController();altControl=altura;
+-    lista.querySelectorAll('button:not(.alternativaCancelar)').forEach(x=>x.disabled=true);
+-    estado.textContent='Preparando recorrido y alturas…';
+-    const espera=setTimeout(()=>altura.abort(),20000);
+-    try{await alturasTerrenoGps(r,altura.signal)}catch(e){}finally{clearTimeout(espera)}
+-   }
++   const altura=new AbortController();altControl=altura;
++   lista.querySelectorAll('button:not(.alternativaCancelar)').forEach(x=>x.disabled=true);
++   estado.textContent='Preparando recorrido y alturas…';
++   const espera=setTimeout(()=>altura.abort(),20000);
++   try{await alturasTerrenoGps(r,altura.signal)}catch(e){}finally{clearTimeout(espera)}
+    if(gen!==altGeneracion)return;
+    cancelaAlternativas();aplicaMapaGps(r);
+-   estadoMapaGps(textoRevisionBtt(r.revisionBtt));
++   estadoMapaGps('');
+    notice('Recorrido elegido. Puedes añadir puntos o editarlo.');
+   };
+   preview(0);
+diff --git a/src/js/12-btt.js b/src/js/12-btt.js
+deleted file mode 100644
+index 61b9af4..0000000
+--- a/src/js/12-btt.js
++++ /dev/null
+@@ -1,168 +0,0 @@
+-// El perfil del motor elige caminos. Aquí se comprueba además si la subida
+-// es razonable para el modo BTT antes de añadirla o guardarla en el borrador.
+-const VENTANA_BTT=200, PENDIENTE_BTT=25, HUECO_ALTURA_BTT=80;
+-
+-function rampasBtt(parts,firmes=[]){
+- const rows=[];
+- let total=0;
+- for(const part of parts)for(const p of part){
+-  const prev=rows.at(-1);
+-  if(prev){
+-   const delta=metros2(prev.p,p);
+-   if(delta<.01)continue;
+-   total+=delta;
+-  }
+-  rows.push({d:total,p});
+- }
+- if(rows.length<2)return {tramos:[],alturaIncierta:true};
+- const alturaIncierta=rows.some((r,i)=>!Number.isFinite(r.p[2])||i>0&&r.d-rows[i-1].d>HUECO_ALTURA_BTT);
+- const tramos=[];
+- let i=0;
+- function mide(d){
+-  while(i>0&&rows[i].d>d)i--;
+-  while(i+1<rows.length-1&&rows[i+1].d<d)i++;
+-  const a=rows[i],b=rows[i+1];
+-  const f=(d-a.d)/(b.d-a.d);
+-  const p=[a.p[0]+(b.p[0]-a.p[0])*f,a.p[1]+(b.p[1]-a.p[1])*f];
+-  const h=f<=1e-6?a.p[2]:f>=1-1e-6?b.p[2]:b.d-a.d<=HUECO_ALTURA_BTT&&Number.isFinite(a.p[2])&&Number.isFinite(b.p[2])?a.p[2]+(b.p[2]-a.p[2])*f:null;
+-  return {p,h};
+- }
+- if(total>=VENTANA_BTT){
+-  const limite=total-VENTANA_BTT;
+-  for(let desde=0;;desde=Math.min(limite,desde+20)){
+-   const hasta=desde+VENTANA_BTT;
+-   const cotas=[0,50,100,150,200].map(m=>mide(desde+m).h);
+-   if(cotas.every(Number.isFinite)){
+-    const pendiente=(cotas[4]-cotas[0])/VENTANA_BTT*100;
+-    // Dos bloques de subida, para que un salto aislado de altura no baste.
+-    const bloques=cotas.slice(1).filter((h,j)=>h-cotas[j]>=5).length;
+-    const pavimentado=firmes.some(f=>f.desde<=desde&&f.hasta>=hasta);
+-    if(pendiente>=PENDIENTE_BTT&&bloques>=2&&!pavimentado){
+-     const anterior=tramos.at(-1);
+-     if(anterior&&desde<=anterior.hasta){
+-      anterior.hasta=hasta;
+-      anterior.pendiente=Math.max(anterior.pendiente,pendiente);
+-     }else tramos.push({desde,hasta,pendiente});
+-    }
+-   }
+-   if(desde>=limite)break;
+-  }
+- }
+- for(const t of tramos)t.puntos=[mide(t.desde).p,...rows.filter(r=>r.d>t.desde&&r.d<t.hasta).map(r=>r.p.slice(0,2)),mide(t.hasta).p];
+- return {tramos,alturaIncierta};
+-}
+-
+-function firmeBtt(candidate){
+- const messages=candidate.terrain;
+- if(!Array.isArray(messages)||!Array.isArray(messages[0]))return [];
+- const header=messages[0],lng=header.indexOf('Longitude'),lat=header.indexOf('Latitude'),distance=header.indexOf('Distance'),tags=header.indexOf('WayTags');
+- if([lng,lat,distance,tags].some(k=>k<0))return [];
+- const points=candidate.parts[0],firmes=[];
+- let limite=0,indice=0,metros=0,prev=0;
+- for(const row of messages.slice(1)){
+-  if(!Array.isArray(row)||!/^\d+$/.test(row[distance]))return [];
+-  limite+=Number(row[distance]);
+-  const fin=[Number(row[lat])/1e6,Number(row[lng])/1e6];
+-  if(!fin.every(Number.isFinite))return [];
+-  while(indice<points.length-1&&metros2(points[indice],fin)>4&&metros<limite+50){
+-   metros+=metros2(points[indice],points[indice+1]);indice++;
+-  }
+-  if(metros2(points[indice],fin)>4||Math.abs(metros-limite)>Math.max(30,limite*.04))return [];
+-  const tag=String(row[tags]||'');
+-  const bueno=/\bsurface=(asphalt|paved|concrete|paving_stones)\b/.test(tag)&&!/\b(highway=steps|smoothness=(very_bad|horrible|very_horrible|impassable)|bicycle=(no|dismount))\b/.test(tag);
+-  if(bueno&&metros>prev){
+-   const ultimo=firmes.at(-1);
+-   if(ultimo&&ultimo.hasta===prev)ultimo.hasta=metros;
+-   else firmes.push({desde:prev,hasta:metros});
+-  }
+-  prev=metros;
+- }
+- return firmes;
+-}
+-
+-function prefijoBtt(points,start){
+- if(points.length<2||metros2(points.at(-1),start)>3)return [];
+- let m=0,i=points.length-1;
+- while(i>0&&m<VENTANA_BTT){
+-  m+=metros2(points[i],points[i-1]);i--;
+- }
+- return points.slice(i,-1);
+-}
+-
+-async function revisaCandidatasBtt(candidates,signal,prefijo=[],extremos=null){
+- const revisadas=[];
+- for(const candidate of candidates){
+-  if(signal.aborted)break;
+-  const firmes=firmeBtt(candidate);
+-  const revisar=()=>{
+-   if(!prefijo.length)return rampasBtt(candidate.parts,firmes);
+-   const inicio=[...prefijo,candidate.parts[0][0]];
+-   const m=inicio.slice(1).reduce((sum,p,i)=>sum+metros2(inicio[i],p),0);
+-   const revision=rampasBtt([prefijo,...candidate.parts],firmes.map(f=>({desde:f.desde+m,hasta:f.hasta+m})));
+-   revision.tramos=revision.tramos.filter(t=>t.hasta>m);
+-   return revision;
+-  };
+-  let revision=revisar();
+-  if(revision.alturaIncierta){
+-   try{await alturasTerrenoGps(candidate,signal)}catch(e){}
+-   revision=revisar();
+-  }
+-  revisadas.push({...candidate,revisionBtt:revision});
+- }
+- const calidad=r=>r.revisionBtt.tramos.length?2:r.revisionBtt.alturaIncierta?1:0;
+- const ordena=(a,b)=>calidad(a)-calidad(b);
+- const rampas=revisadas.flatMap(r=>r.revisionBtt.tramos);
+- if(extremos&&rampas.length&&revisadas.some(r=>calidad(r)>0)&&!signal.aborted){
+-  const motor=window.MallabiMotor;
+-  try{
+-   const [a,b]=extremos;
+-   const centros=rampas.map(r=>r.puntos[Math.floor(r.puntos.length/2)]);
+-   const vuelta=await motor.fetchBttDetour(a,b,centros,signal);
+-   if(vuelta&&(!prefijo.length||metros2(a,vuelta.parts[0][0])<=3)){
+-    vuelta.anchors=[vuelta.parts[0][0],vuelta.parts[0].at(-1)];
+-    if(motor.validaAlternativa([a,b],vuelta)){
+-     const extra=await revisaCandidatasBtt([vuelta],signal,prefijo);
+-     const combinadas=[...revisadas,...extra].sort(ordena);
+-     return motor.uniqueAlternatives(combinadas,a,b);
+-    }
+-   }
+-  }catch(e){}
+- }
+- return revisadas.sort(ordena);
+-}
+-
+-function textoRevisionBtt(revision,conKm=true){
+- if(!revision)return '';
+- const r=revision.tramos[0];
+- if(r)return 'Probable tramo a pie · rampa del '+Math.round(r.pendiente)+' %'+(conKm?' · desde el km '+(r.desde/1000).toFixed(2).replace('.',','):'')+(revision.tramos.length>1?' · '+revision.tramos.length+' rampas':'');
+- return revision.alturaIncierta?'BTT sin verificar · faltan alturas para comprobar la pendiente':'';
+-}
+-
+-function capaRampasBtt(revision){
+- return revision?.tramos.map(r=>L.polyline(r.puntos,{color:'#ff6946',weight:9,dashArray:'9 7',interactive:false}))||[];
+-}
+-
+-function confirmaTramoBtt(result,signal){
+- const texto=textoRevisionBtt(result.revisionBtt,false);
+- if(signal.aborted||!texto)return Promise.resolve(!signal.aborted);
+- const capas=capaRampasBtt(result.revisionBtt);
+- const vista=L.featureGroup(capas.length?capas:result.parts.map(p=>L.polyline(p,{color:'#ffad4a',weight:5,dashArray:'9 7',interactive:false}))).addTo(map);
+- estadoMapaGps(texto+' · Elige si quieres añadir el tramo.');
+- const status=$('plannerStatus');
+- return new Promise(resolve=>{
+-  const descarta=document.createElement('button'),incluye=document.createElement('button');
+-  for(const b of [descarta,incluye]){b.type='button';b.className='une-recta'}
+-  descarta.textContent='Descartar tramo';
+-  incluye.textContent='Incluir tramo de todos modos';
+-  const fin=acepta=>{
+-   signal.removeEventListener('abort',cancela);
+-   map.removeLayer(vista);descarta.remove();incluye.remove();resolve(acepta);
+-  };
+-  const cancela=()=>fin(false);
+-  signal.addEventListener('abort',cancela,{once:true});
+-  descarta.onclick=cancela;incluye.onclick=()=>fin(true);
+-  status.append(descarta,incluye);
+- });
+-}
+-
+-if(typeof module==='object'&&module&&module.exports)module.exports={rampasBtt,firmeBtt,revisaCandidatasBtt,textoRevisionBtt};
+diff --git a/src/nuevo.plantilla.html b/src/nuevo.plantilla.html
+index 5b66888..6192436 100644
+--- a/src/nuevo.plantilla.html
++++ b/src/nuevo.plantilla.html
+@@ -704,7 +704,6 @@ body.creating-route:has(.compact-preview) :is(#elevationPanel,.modes){visibility
+  }
+  #alternativasPanel{grid-column:1/-1}
+ }
+-#alternativasEstado.aviso-btt{color:#ffc083;font-weight:700}
+ #plannerStatus button + button{margin-left:5px}
+ #routeListScope{grid-template-columns:repeat(2,minmax(0,1fr))}
+ #routeDialog.route-map-search{background:none;pointer-events:none}
+@@ -712,7 +711,7 @@ body.creating-route:has(.compact-preview) :is(#elevationPanel,.modes){visibility
+ .route-map-hint{font-size:12px;color:#bfdae4;margin:4px 0 8px}
+ </style></head><body><div id="app">
+ <header class="top"><div><strong>TRABAKUTIK <span style="color:#70eaff">GPS</span></strong><small id="title">Elige una ruta</small></div><a href="https://trabakutik.com/">← Volver a la web</a></header>
+-<div id="map" aria-label="Mapa de todas las rutas"><div id="mapRot"></div><div id="creadorDock"><label id="creadorActividad">Actividad <select id="alternativasActividad"><option value="bike">BTT / e-bike</option><option value="foot">Senderismo</option><option value="car">Coche</option></select></label><div id="creadorModo"><button type="button" id="modoManual" aria-pressed="true">Punto a punto</button><button type="button" id="modoDosPuntos" aria-pressed="false">Inicio y destino</button></div><section id="alternativasPanel" class="hidden"><header><b>Elige tu recorrido</b><button type="button" id="alternativasCerrar" aria-label="Volver a punto a punto">✕</button></header><p id="alternativasEstado" role="status"></p><div id="alternativasLista" class="hidden"></div></section></div><div class="tools"><button id="eye" title="Mostrar rutas de Trabakutik" aria-label="Mostrar rutas de Trabakutik" aria-pressed="false"><svg viewBox="0 0 24 24" width="23" height="23" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m3 7 9-4 9 4-9 4-9-4Z"/><path d="m3 12 9 4 9-4M3 17l9 4 9-4"/></svg></button><button id="locate" title="Mi posición" aria-label="Centrar en mi posición">⌖</button><button id="orient" type="button" aria-pressed="true" title="Orientar el mapa" aria-label="Orientar el mapa: rumbo arriba o norte arriba"><svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 L16 20 L12 17 L8 20 Z"/></svg></button><button id="audioMode" type="button" data-modo="voz" aria-label="Avisos por voz y pitidos" title="Cambiar avisos sonoros"><svg id="audioIcon" viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/></svg></button><button id="sos" type="button" aria-label="Compartir coordenadas SOS" hidden>SOS</button><button id="guardaMapa" type="button" title="Guardar el mapa de esta ruta para andar sin cobertura" aria-label="Guardar el mapa de esta ruta"><small>mapa</small><b>⤓</b></button></div><button type="button" id="avisoMal" class="aviso-mal hidden"></button><button type="button" id="avisoFalta" class="aviso-mal aviso-falta hidden">✋ Faltó aquí</button><div id="turnHint" class="turn-hint hidden" role="status" aria-live="polite"><div class="turn-fila"><span id="turnArrow" class="turn-arrow"></span><span class="turn-copy"><b id="turnDirection">Gira a la derecha</b><small id="turnAngle">Giro de 78&deg;</small><span class="turn-dist"><em id="turnDistance">50</em><i>m</i></span></span></div><div class="turn-fases"><i></i><i></i></div><div class="turn-rot"><span id="turnRot1">50 m</span><span>en el cruce</span></div></div><div class="info"><div class="info-top"><button id="mapTitle" class="route-title-link" type="button" disabled title="Ficha de la ruta">Mapa de rutas</button><button id="clearActiveRoute" class="clear-active hidden" type="button" aria-label="Quitar ruta activa del mapa" title="Quitar ruta activa">×</button><label class="basemap-control"><span>Mapa</span><select id="basemap" aria-label="Elegir fondo de mapa"><option value="osm">OSM</option><option value="ign">IGN</option><option value="pnoa">Sat.</option></select></label></div><div id="gpsState" data-estado="inactivo">GPS sin iniciar</div><span id="compass" class="compass hidden"><svg viewBox="0 0 40 40" width="40" height="40" aria-hidden="true"><circle cx="20" cy="20" r="18" fill="#07202dcc" stroke="#4ba7bc" stroke-width="1.4"/><text x="20" y="9.4" text-anchor="middle" font-size="7.5" font-weight="800" fill="#8fd3e4">N</text><text x="20" y="36" text-anchor="middle" font-size="6.5" fill="#54818f">S</text><text x="35.2" y="22.6" text-anchor="middle" font-size="6.5" fill="#54818f">E</text><text x="4.8" y="22.6" text-anchor="middle" font-size="6.5" fill="#54818f">O</text><g id="compassNeedle" transform="rotate(0 20 20)"><path d="M20 3.5 L26 25 L20 21 L14 25 Z" fill="#ff9c3b" stroke="#020617" stroke-width="1.2" stroke-linejoin="round"/><circle cx="20" cy="20" r="2.1" fill="#07202d" stroke="#8ef0ff" stroke-width="1.1"/></g></svg><b id="compassText">—</b></span><span id="routeProgress" class="route-progress hidden"></span><span id="distance">Ruta destacada en cian</span><span id="backgroundRouteLegend" class="hidden">Naranja continua · e-bike / Verde discontinua · senderismo / Dos colores · mixta</span><span id="ffProxBox" class="ff"><span class="ff-lab">Próx. cruce</span><b id="ffProx">—</b></span><span id="ffTrackBox" class="ff"><span class="ff-lab">Al track</span><b id="ffTrack">—</b></span><span id="ffAltBox" class="ff"><span class="ff-lab">Altitud</span><b id="ffAlt">—</b></span><button type="button" id="simBanda" class="sim-banda hidden">▶ SIMULANDO · toca para parar</button><span id="reverseWarn" class="reverse-warn hidden">&#8646; La est&aacute;s haciendo AL REV&Eacute;S &middot; los giros van corregidos</span></div><div id="plannerStatus" class="hidden" role="status" aria-live="polite"></div><span class="on-map" id="drawTip" hidden>Toca las líneas para marcar puntos azules</span><div id="mapCredit"></div><div id="plannerCredit"><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a> · cálculo FOSSGIS · <a href="https://www.openstreetmap.org/fixthemap" target="_blank" rel="noopener">Corregir mapa</a></div></div>
++<div id="map" aria-label="Mapa de todas las rutas"><div id="mapRot"></div><div id="creadorDock"><label id="creadorActividad">Actividad <select id="alternativasActividad"><option value="foot">Senderismo</option><option value="car">Coche</option></select></label><div id="creadorModo"><button type="button" id="modoManual" aria-pressed="true">Punto a punto</button><button type="button" id="modoDosPuntos" aria-pressed="false">Inicio y destino</button></div><section id="alternativasPanel" class="hidden"><header><b>Elige tu recorrido</b><button type="button" id="alternativasCerrar" aria-label="Volver a punto a punto">✕</button></header><p id="alternativasEstado" role="status"></p><div id="alternativasLista" class="hidden"></div></section></div><div class="tools"><button id="eye" title="Mostrar rutas de Trabakutik" aria-label="Mostrar rutas de Trabakutik" aria-pressed="false"><svg viewBox="0 0 24 24" width="23" height="23" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m3 7 9-4 9 4-9 4-9-4Z"/><path d="m3 12 9 4 9-4M3 17l9 4 9-4"/></svg></button><button id="locate" title="Mi posición" aria-label="Centrar en mi posición">⌖</button><button id="orient" type="button" aria-pressed="true" title="Orientar el mapa" aria-label="Orientar el mapa: rumbo arriba o norte arriba"><svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 L16 20 L12 17 L8 20 Z"/></svg></button><button id="audioMode" type="button" data-modo="voz" aria-label="Avisos por voz y pitidos" title="Cambiar avisos sonoros"><svg id="audioIcon" viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/></svg></button><button id="sos" type="button" aria-label="Compartir coordenadas SOS" hidden>SOS</button><button id="guardaMapa" type="button" title="Guardar el mapa de esta ruta para andar sin cobertura" aria-label="Guardar el mapa de esta ruta"><small>mapa</small><b>⤓</b></button></div><button type="button" id="avisoMal" class="aviso-mal hidden"></button><button type="button" id="avisoFalta" class="aviso-mal aviso-falta hidden">✋ Faltó aquí</button><div id="turnHint" class="turn-hint hidden" role="status" aria-live="polite"><div class="turn-fila"><span id="turnArrow" class="turn-arrow"></span><span class="turn-copy"><b id="turnDirection">Gira a la derecha</b><small id="turnAngle">Giro de 78&deg;</small><span class="turn-dist"><em id="turnDistance">50</em><i>m</i></span></span></div><div class="turn-fases"><i></i><i></i></div><div class="turn-rot"><span id="turnRot1">50 m</span><span>en el cruce</span></div></div><div class="info"><div class="info-top"><button id="mapTitle" class="route-title-link" type="button" disabled title="Ficha de la ruta">Mapa de rutas</button><button id="clearActiveRoute" class="clear-active hidden" type="button" aria-label="Quitar ruta activa del mapa" title="Quitar ruta activa">×</button><label class="basemap-control"><span>Mapa</span><select id="basemap" aria-label="Elegir fondo de mapa"><option value="osm">OSM</option><option value="ign">IGN</option><option value="pnoa">Sat.</option></select></label></div><div id="gpsState" data-estado="inactivo">GPS sin iniciar</div><span id="compass" class="compass hidden"><svg viewBox="0 0 40 40" width="40" height="40" aria-hidden="true"><circle cx="20" cy="20" r="18" fill="#07202dcc" stroke="#4ba7bc" stroke-width="1.4"/><text x="20" y="9.4" text-anchor="middle" font-size="7.5" font-weight="800" fill="#8fd3e4">N</text><text x="20" y="36" text-anchor="middle" font-size="6.5" fill="#54818f">S</text><text x="35.2" y="22.6" text-anchor="middle" font-size="6.5" fill="#54818f">E</text><text x="4.8" y="22.6" text-anchor="middle" font-size="6.5" fill="#54818f">O</text><g id="compassNeedle" transform="rotate(0 20 20)"><path d="M20 3.5 L26 25 L20 21 L14 25 Z" fill="#ff9c3b" stroke="#020617" stroke-width="1.2" stroke-linejoin="round"/><circle cx="20" cy="20" r="2.1" fill="#07202d" stroke="#8ef0ff" stroke-width="1.1"/></g></svg><b id="compassText">—</b></span><span id="routeProgress" class="route-progress hidden"></span><span id="distance">Ruta destacada en cian</span><span id="backgroundRouteLegend" class="hidden">Naranja continua · e-bike / Verde discontinua · senderismo / Dos colores · mixta</span><span id="ffProxBox" class="ff"><span class="ff-lab">Próx. cruce</span><b id="ffProx">—</b></span><span id="ffTrackBox" class="ff"><span class="ff-lab">Al track</span><b id="ffTrack">—</b></span><span id="ffAltBox" class="ff"><span class="ff-lab">Altitud</span><b id="ffAlt">—</b></span><button type="button" id="simBanda" class="sim-banda hidden">▶ SIMULANDO · toca para parar</button><span id="reverseWarn" class="reverse-warn hidden">&#8646; La est&aacute;s haciendo AL REV&Eacute;S &middot; los giros van corregidos</span></div><div id="plannerStatus" class="hidden" role="status" aria-live="polite"></div><span class="on-map" id="drawTip" hidden>Toca las líneas para marcar puntos azules</span><div id="mapCredit"></div><div id="plannerCredit"><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a> · cálculo FOSSGIS · <a href="https://www.openstreetmap.org/fixthemap" target="_blank" rel="noopener">Corregir mapa</a></div></div>
+ <section id="tripBox" class="hidden" aria-label="Lo que llevas" aria-live="off"><div class="trip-nombre" id="tripRuta"></div><div class="trip-tres"><div class="trip-col"><h3>Distancia</h3><div class="trip-g"><span id="tripHecho"></span><small id="tripHechoU">km</small></div><div class="trip-p"><span id="tripQuedaTxt">quedan </span><b id="tripQueda"></b></div><div class="trip-pista"><i id="tripBarra"></i></div></div><div class="trip-col"><h3>Desnivel</h3><div class="trip-g" id="tripDesnivel" role="text"><span class="par"><span class="sube" aria-hidden="true">▲</span><span id="tripSubido"></span></span> <span class="par"><span class="baja" aria-hidden="true">▼</span><span id="tripBajado"></span></span></div><div class="trip-p">falta <b id="tripFalta"></b></div></div><div class="trip-col"><h3>Tiempo</h3><div class="trip-g" id="tripTiempo">—</div><div class="trip-p">en marcha<b id="tripAltitud" class="hidden"></b></div></div></div><div class="trip-perfil-caja"><svg id="tripPerfil" viewBox="0 0 300 48" preserveAspectRatio="none" aria-hidden="true"><defs><clipPath id="tripHechoClip"><path id="tripHechoRect" d=""/></clipPath></defs><path id="tripPerfilArea" fill="#4fd8f0" fill-opacity=".14"/><path id="tripPerfilHecho" fill="#4fd8f0" fill-opacity=".38" clip-path="url(#tripHechoClip)"/><path id="tripPerfilLinea" fill="none" stroke="#4fd8f0" stroke-width="2" vector-effect="non-scaling-stroke"/><circle id="tripPerfilPunto" r="0" fill="#1e7bf2" stroke="#fff" stroke-width="2" vector-effect="non-scaling-stroke"/></svg><div id="tripPerfilMarcas" aria-hidden="true"></div></div><div class="trip-botones"><button type="button" id="tripPausa" class="trip-proxy">❙❙ Pausa</button><button type="button" id="tripSigue" class="trip-proxy go hidden">▶ Seguir</button><button type="button" id="tripParar" class="trip-proxy red">■ Parar</button><button type="button" id="tripBloquea" class="trip-bloquea" aria-label="Bloquear la pantalla" title="Bloquear la pantalla: los toques no hacen nada hasta desbloquear">🔒</button><button id="despeja" class="despeja hidden" type="button" title="Mostrar u ocultar los mandos" aria-expanded="false">⌄ Ocultar</button></div></section>
+ <div id="candado" class="hidden" role="dialog" aria-modal="true" aria-label="Pantalla bloqueada"><button type="button" id="candadoQuita"><span aria-hidden="true">🔒</span><span>Bloqueada · mantén pulsado para desbloquear</span></button></div>
+ <section id="elevationPanel" class="elevation-panel hidden" aria-label="Perfil de elevación">
