@@ -1,0 +1,267 @@
+diff --git a/android/app/build.gradle.kts b/android/app/build.gradle.kts
+index bef788c..8773a4b 100644
+--- a/android/app/build.gradle.kts
++++ b/android/app/build.gradle.kts
+@@ -2,7 +2,7 @@ plugins { id("com.android.application") }
+ android {
+  namespace = "com.trabakutik.gps"
+  compileSdk = 35
+- defaultConfig { applicationId = "com.trabakutik.mallabigps"; minSdk = 26; targetSdk = 35; versionCode = 157; versionName = "1.0.13" }
++ defaultConfig { applicationId = "com.trabakutik.mallabigps"; minSdk = 26; targetSdk = 35; versionCode = 158; versionName = "1.0.14" }
+  compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+  // Firma independiente de MallabiGPS, nunca la del navegador antiguo.
+  val llaveFija = rootProject.file("firma/mallabi.p12")
+diff --git a/scripts/test-browser.cjs b/scripts/test-browser.cjs
+index 0f43c2b..0beffc5 100644
+--- a/scripts/test-browser.cjs
++++ b/scripts/test-browser.cjs
+@@ -495,12 +495,60 @@ async function setup(context) {
+       const source=fs.readFileSync(path.join(root,'nuevo.html'),'utf8');
+       const end='\n})();\n</script>';
+       assert(source.includes(end));
+-      const bridge=`window.__creator={map,mueveAnclaGps,nodosManualesGps,
++      const bridge=`window.__creator={map,mueveAnclaGps,nodosManualesGps,onFix,
++        get rutasListas(){return rutasListas},
+         get redGps(){return redGps},get drawPoints(){return drawPoints},
+         get drawLayer(){return drawLayer},get anclasGps(){return anclasGps},
+         get tramosGps(){return tramosGps},get routePoints(){return routePoints}};`;
+       await route.fulfill({contentType:'text/html',body:source.replace(end,'\n'+bridge+end)});
+     });
++    const vistaEditor=await personal.newPage();
++    let devuelveCatalogo;
++    const catalogoListo=new Promise(resolve=>{devuelveCatalogo=resolve});
++    await vistaEditor.route('**/data/trailhead.json',async route=>{
++      await catalogoListo;
++      await route.continue();
++    });
++    await vistaEditor.goto(base+'nuevo.html');
++    await vistaEditor.click('#crearDesdeRuta');
++    await vistaEditor.waitForFunction(()=>window.__creator?.redGps);
++    await vistaEditor.evaluate(()=>{
++      const {map}=window.__creator;
++      map.fire('click',{latlng:L.latLng(43.2,-2.5)});
++      map.setView([43.3,-2.7],16,{animate:false});
++    });
++    const centro=()=>vistaEditor.evaluate(()=>{
++      const {lat,lng}=window.__creator.map.getCenter();
++      return [lat,lng];
++    });
++    const lejos=await centro();
++    devuelveCatalogo();
++    await vistaEditor.waitForFunction(()=>window.__creator.rutasListas);
++    const trasCatalogo=await centro();
++    await vistaEditor.evaluate(()=>{
++      const {map,onFix}=window.__creator;
++      map.setView([43.3,-2.7],16,{animate:false});
++      document.dispatchEvent(new Event('visibilitychange'));
++      onFix({coords:{latitude:43.2,longitude:-2.5,accuracy:5,heading:null,speed:0}});
++    });
++    const trasGps=await centro();
++    const mismoCentro=(a,b)=>Math.hypot(a[0]-b[0],a[1]-b[1])<.0001;
++    assert(mismoCentro(trasCatalogo,lejos),`el catálogo no debe mover el mapa de ${lejos} a ${trasCatalogo}`);
++    assert(mismoCentro(trasGps,lejos),`el GPS no debe mover el mapa de ${lejos} a ${trasGps}`);
++    for(const viewport of [{width:320,height:740},{width:390,height:844},{width:740,height:360}]){
++      await vistaEditor.setViewportSize(viewport);
++      const hueco=await vistaEditor.evaluate(()=>{
++        const dock=document.querySelector('#creadorDock').getBoundingClientRect();
++        const tabs=document.querySelector('.modes').getBoundingClientRect();
++        return Math.round(tabs.top-dock.bottom);
++      });
++      assert(hueco>=0&&hueco<=10,`Actividad y modos quedan junto a las pestañas a ${viewport.width} px`);
++    }
++    await vistaEditor.setViewportSize({width:390,height:844});
++    await vistaEditor.click('#locate');
++    assert(mismoCentro(await centro(),[43.2,-2.5]),'centrar a mano sigue disponible');
++    await vistaEditor.close();
++    console.log('PASS Chromium: al dibujar lejos se mantiene el mapa y los controles quedan abajo');
+     const buscador=await personal.newPage();
+     await buscador.goto(base+'nuevo.html');
+     await buscador.waitForFunction(()=>window.__creator?.map);
+@@ -659,8 +707,10 @@ async function setup(context) {
+       assert.equal(await opciones.evaluate(()=>window.__creator.drawPoints.length),0);
+     }
+     await opciones.locator('#alternativasActividad').selectOption('bike');
++    await opciones.evaluate(()=>window.__creator.map.setView([43.015,-2.01],17,{animate:false}));
+     await opciones.evaluate(()=>{window.__soloRampa=true;window.__toques()});
+     await opciones.getByRole('button',{name:'Descartar tramo'}).waitFor();
++    assert.equal(await opciones.evaluate(()=>window.__creator.map.getZoom()),17,'el aviso conserva el zoom del editor');
+     assert.match(await opciones.locator('#plannerStatus').textContent(),/Probable tramo a pie/);
+     assert.equal(await opciones.evaluate(()=>window.__creator.anclasGps.length),1);
+     await opciones.getByRole('button',{name:'Descartar tramo'}).click();
+diff --git a/src/js/02-mapa.js b/src/js/02-mapa.js
+index 987750a..82a1c3b 100644
+--- a/src/js/02-mapa.js
++++ b/src/js/02-mapa.js
+@@ -89,7 +89,7 @@ function pintaMandos(){
+  // dos veces. Mirar solo watch dejaba este boton apagado para siempre en
+  // la app, con el mapa siguiendote delante. Lo vio el autor en su captura.
+  // Lo que cuenta es que llegue posicion, venga de donde venga.
+- $('locate').classList.toggle('siguiendo',(watch!==null||fuenteNativa)&&followGps&&Date.now()>=manualMapUntil);
++ $('locate').classList.toggle('siguiendo',mode!=='create'&&(watch!==null||fuenteNativa)&&followGps&&Date.now()>=manualMapUntil);
+ }
+ function pintaOrient(){
+  const on=cursoArriba;
+@@ -101,7 +101,9 @@ function pintaOrient(){
+   ?'<svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 L16 20 L12 17 L8 20 Z"/></svg>'
+   :'<svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 18V6l8 12V6"/></svg>';
+ }
++let centrarEditorAlLocalizar=false;
+ map.on('dragstart',()=>{manualMapUntil=Date.now()+8000;aplicaGiroMapa(true);pintaMandos()});
++map.on('dragstart zoomstart click',()=>{centrarEditorAlLocalizar=false});
+ dimensionaMapa();
+ if(window.ResizeObserver)new ResizeObserver(dimensionaMapa).observe(document.getElementById('map'));
+ else window.addEventListener('resize',dimensionaMapa);
+diff --git a/src/js/03-rutas.js b/src/js/03-rutas.js
+index d4cbe8d..e15dc5c 100644
+--- a/src/js/03-rutas.js
++++ b/src/js/03-rutas.js
+@@ -445,6 +445,7 @@ $('closeDialog').onclick=()=>{
+ $('search').oninput=showRoutes;
+ map.on('moveend',()=>{if(buscandoEnMapa())showRoutes()});
+ function changeMode(m){
++ centrarEditorAlLocalizar=false;
+  if(m!=='create'){if(typeof cancelaAlternativas==='function')cancelaAlternativas();cancelaMapaGps();$('saveCreated').disabled=drawPoints.length<2}
+ 
+  const creating=m==='create';
+diff --git a/src/js/09-navegacion.js b/src/js/09-navegacion.js
+index 8a226fa..8380d0c 100644
+--- a/src/js/09-navegacion.js
++++ b/src/js/09-navegacion.js
+@@ -875,7 +875,8 @@ function onFix(pos){
+  pintaMandos();
+  pintaPosicionGps(p,h);
+  pintaProximoCruce(progreso);
+- if(followGps&&Date.now()>=manualMapUntil){
++ if(centrarEditorAlLocalizar||(mode!=='create'&&followGps&&Date.now()>=manualMapUntil)){
++  centrarEditorAlLocalizar=false;
+   const center=map.getCenter();
+   if(dist([center.lat,center.lng],p)>2)map.panTo(p,{animate:false});
+  }
+@@ -1001,7 +1002,11 @@ window.trabakutikSyncNative=()=>{
+   }
+  }catch(e){console.warn('Seguimiento Android no recuperado',e)}
+ };
+-document.addEventListener('visibilitychange',()=>{if(!document.hidden){followGps=true;manualMapUntil=0;setTimeout(()=>window.trabakutikSyncNative(),250)}});
++document.addEventListener('visibilitychange',()=>{
++ if(document.hidden)return;
++ if(mode!=='create'){followGps=true;manualMapUntil=0}
++ setTimeout(()=>window.trabakutikSyncNative(),250);
++});
+ setInterval(()=>{if(!document.hidden&&window.TrabakutikAndroid)window.trabakutikSyncNative()},4500);
+ // La guia caduca si deja de llegar posicion. Antes se quedaba clavada: la
+ // ficha del giro y el «A X del track» solo se recalculan dentro de onFix,
+diff --git a/src/js/10-aplicacion.js b/src/js/10-aplicacion.js
+index c0bfac0..7618926 100644
+--- a/src/js/10-aplicacion.js
++++ b/src/js/10-aplicacion.js
+@@ -22,7 +22,14 @@ if(!enLaApp){
+  }
+ }
+ $('audioMode').onclick=conmutaModoAudio;pintaModoAudio();
+-pintaEstadoGps();$('locate').onclick=()=>{followGps=true;manualMapUntil=0;if(position){map.setView(position,Math.max(16,map.getZoom()),{animate:false});if(watch===null)startGPS()}else startGPS();window.trabakutikSyncNative?.();pintaMandos()};
++pintaEstadoGps();
++$('locate').onclick=()=>{
++ if(mode==='create')centrarEditorAlLocalizar=!position;
++ else{followGps=true;manualMapUntil=0}
++ if(position)map.setView(position,Math.max(16,map.getZoom()),{animate:false});
++ if(!position||watch===null)startGPS();
++ window.trabakutikSyncNative?.();pintaMandos();
++};
+ // Esto solo sabia manejar TRANSICIONES: si el servicio no grababa y la pagina
+ // tampoco creia grabar, no entraba en ninguna rama y la botonera se quedaba
+ // como estuviera. El autor se encontro con «Pausar» y «Parar» puestos sin
+@@ -299,7 +306,16 @@ fetch('data/rutas.json',{cache:'no-cache'}).then(r=>r.json()).then(d=>{
+  updateElevation();
+  if(!$('routeDialog').classList.contains('hidden'))showRoutes();
+ }).catch(e=>console.warn('No se han podido cargar los nombres de las rutas',e));
+-fetchRouteJson('data/trailhead.json',{cache:'no-cache'}).then(data=>{tracks=data.tracks.filter(t=>t.points?.length>1);const slug=new URLSearchParams(location.search).get('ruta');const n=slug?tracks.findIndex(t=>t.href.replace(/\.html$/,'')===slug.replace(/\.html$/,'')):-1;if(n>=0)selectRoute(n);else{drawAll();map.setView([43.19,-2.55],12);notice('Elige una ruta, o pulsa Empezar para solo grabar por donde vas')} rutasListas=true;showRoutesIfOpen(); }).catch(e=>notice('No se han podido cargar las rutas: '+e.message));
++fetchRouteJson('data/trailhead.json',{cache:'no-cache'}).then(data=>{
++ tracks=data.tracks.filter(t=>t.points?.length>1);
++ const slug=new URLSearchParams(location.search).get('ruta');
++ const n=slug?tracks.findIndex(t=>t.href.replace(/\.html$/,'')===slug.replace(/\.html$/,'')):-1;
++ if(mode==='nav'&&routePoints.length<2){
++  if(n>=0)selectRoute(n);
++  else{drawAll();notice('Elige una ruta, o pulsa Empezar para solo grabar por donde vas')}
++ }else refreshRouteLayers();
++ rutasListas=true;showRoutesIfOpen();
++}).catch(e=>notice('No se han podido cargar las rutas: '+e.message));
+ // Guardar la pagina en el movil para poder abrirla SIN COBERTURA. Ver sw.js.
+ // La aplicacion de Android no lleva la pagina dentro: la carga de GitHub
+ // Pages y ademas con la cache del WebView desactivada, asi que sin esto, en
+diff --git a/src/js/12-btt.js b/src/js/12-btt.js
+index 83e5e98..61b9af4 100644
+--- a/src/js/12-btt.js
++++ b/src/js/12-btt.js
+@@ -147,7 +147,6 @@ function confirmaTramoBtt(result,signal){
+  if(signal.aborted||!texto)return Promise.resolve(!signal.aborted);
+  const capas=capaRampasBtt(result.revisionBtt);
+  const vista=L.featureGroup(capas.length?capas:result.parts.map(p=>L.polyline(p,{color:'#ffad4a',weight:5,dashArray:'9 7',interactive:false}))).addTo(map);
+- map.fitBounds(vista.getBounds(),{padding:[55,90],maxZoom:17});
+  estadoMapaGps(texto+' · Elige si quieres añadir el tramo.');
+  const status=$('plannerStatus');
+  return new Promise(resolve=>{
+diff --git a/src/nuevo.plantilla.html b/src/nuevo.plantilla.html
+index 81d33e1..5b66888 100644
+--- a/src/nuevo.plantilla.html
++++ b/src/nuevo.plantilla.html
+@@ -430,11 +430,13 @@ body.creating-route{
+  --crea-extra:78px;
+  --create-summary-height:calc(83px + var(--crea-extra));
+  --create-profile-height:calc(145px + var(--crea-extra));
++ --create-panel-height:var(--create-profile-height);
++ --create-tabs-bottom:calc(var(--create-panel-height) + 15px);
+ }
+ body.creating-route #elevationPanel{
+- bottom:9px;height:var(--create-profile-height);padding:6px 10px;
++ bottom:9px;height:var(--create-panel-height);padding:6px 10px;
+ }
+-body.creating-route .modes{bottom:calc(var(--create-profile-height) + 22px)}
++body.creating-route .modes{bottom:var(--create-tabs-bottom)}
+ body.creating-route #elevationPanel .elevation-stats{
+  display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;
+  font-size:clamp(15px,4.5vw,21px);line-height:1.15;font-variant-numeric:tabular-nums;
+@@ -453,16 +455,12 @@ body.creating-route #elevationSvg{height:52px;margin-top:5px}
+  padding:0;border:1px solid #4d7586;border-radius:8px;
+  background:#123849;color:#c9ecf5;font-size:18px;line-height:1;flex:none;
+ }
+-body.creating-route #elevationPanel.collapsed,
+-body.creating-route #elevationPanel.profile-distance-only{height:var(--create-summary-height)}
++body.creating-route:has(#elevationPanel:is(.collapsed,.profile-distance-only)){--create-panel-height:var(--create-summary-height)}
+ body.creating-route #elevationPanel.collapsed #elevationSvg,
+ body.creating-route #elevationPanel.collapsed .elevation-foot{display:none}
+-body.creating-route:has(#elevationPanel.collapsed) .modes,
+-body.creating-route:has(#elevationPanel.profile-distance-only) .modes{bottom:calc(var(--create-summary-height) + 22px)}
+-body.creating-route #elevationPanel.profile-empty:not(.profile-distance-only){height:34px}
++body.creating-route:has(#elevationPanel.profile-empty:not(.profile-distance-only)){--create-panel-height:34px}
+ body.creating-route #elevationPanel.profile-empty:not(.profile-distance-only) .elevation-stats{display:none}
+ body.creating-route #elevationPanel.profile-empty .elevation-head{min-height:22px}
+-body.creating-route:has(#elevationPanel.profile-empty:not(.profile-distance-only)) .modes{bottom:55px}
+ body.creating-route #elevationPanel.profile-empty #toggleProfile{display:none}
+ body.creating-route #elevationPanel.profile-empty:not(.profile-distance-only) :is(.crea-resumen,.crea-botones){display:none}
+ #plannerCredit{display:none}
+@@ -675,7 +673,7 @@ body.despejado #compass b{font-size:22px}
+ #compass b small{font-size:.5em;font-weight:700;color:#94a3b8;margin-left:4px;letter-spacing:0}
+ @media (max-width:389px){body.despejado #compass svg{width:32px;height:32px}body.despejado #compass b{font-size:18px}}
+ #creadorModo{display:none}body.creating-route #creadorModo{display:flex;gap:4px;position:absolute;z-index:1001;bottom:calc(var(--create-profile-height,145px) + 72px);left:50%;transform:translateX(-50%);background:#102632;padding:4px;border-radius:12px;white-space:nowrap}#creadorModo button{font-size:12px;min-height:44px;padding:6px 10px;border-radius:9px}#creadorModo button[aria-pressed=true]{background:#7ce4e6;color:#102632}#alternativasPanel{position:absolute;z-index:1002;left:10px;right:10px;bottom:12px;max-height:48%;overflow:auto;background:#102632f5;border:1px solid #4a7580;border-radius:18px;padding:12px;color:#f1f8fa;box-shadow:0 5px 24px #0008}#alternativasPanel.hidden,#alternativasLista.hidden{display:none}#alternativasPanel header{display:flex;align-items:center;justify-content:space-between;gap:8px}#alternativasLista{display:grid;gap:7px;margin-top:8px}.alternativa{display:grid;text-align:left;gap:4px;border-left:5px solid;background:#183642;border-radius:12px;padding:10px;color:#f1f8fa}.alternativa small{font-size:12px;color:#c5e5eb}body:not(.creating-route) #alternativasPanel{display:none}
+-#creadorDock{display:none}body.creating-route #creadorDock{display:flex;flex-direction:column;gap:6px;position:absolute;z-index:1002;left:10px;right:10px;bottom:calc(var(--create-profile-height,145px) + 8px);padding:7px;background:#102632f5;border:1px solid #4a7580;border-radius:16px;box-shadow:0 5px 20px #0006;color:#f1f8fa}body.creating-route #creadorDock:has(#alternativasPanel:not(.hidden)){bottom:12px}body.creating-route #creadorModo{position:static;transform:none;display:flex;gap:6px;padding:0;background:none;white-space:normal}#creadorModo button{flex:1;min-width:0;background:#162e3b;color:#d6eef2;border:1px solid #41616e;font-weight:650}#creadorModo button[aria-pressed=true]{background:#173c46;color:#8cecef;border-color:#75dce0;box-shadow:inset 0 -2px #75dce0}#alternativasPanel{position:static;max-height:32vh;padding:4px 5px 2px;border:0;border-radius:0;box-shadow:none;background:none}#alternativasPanel header{font-size:14px;margin:0 0 5px}#alternativasCerrar{min-width:44px;min-height:44px;color:#d6eef2;background:#183642;border:1px solid #41616e;border-radius:10px}#alternativasPanel label{display:flex;align-items:center;gap:8px;font-size:13px}#alternativasActividad{flex:1;min-height:44px;background:#183642;color:#e7f6f8;border:1px solid #41616e;border-radius:9px;padding:4px 8px;font:inherit;color-scheme:dark}#alternativasEstado{font-size:14px;margin:7px 0 2px;color:#bde5e8}#alternativasLista{margin-top:5px;gap:5px}.alternativa{padding:7px 10px;min-height:44px}#alternativasPanel{max-height:none;overflow:visible;min-height:0}#creadorDock{box-sizing:border-box}
++#creadorDock{display:none}body.creating-route #creadorDock{display:flex;flex-direction:column;gap:6px;position:absolute;z-index:1002;left:10px;right:10px;bottom:calc(var(--create-tabs-bottom) + 52px);padding:7px;background:#102632f5;border:1px solid #4a7580;border-radius:16px;box-shadow:0 5px 20px #0006;color:#f1f8fa}body.creating-route #creadorModo{position:static;transform:none;display:flex;gap:6px;padding:0;background:none;white-space:normal}#creadorModo button{flex:1;min-width:0;background:#162e3b;color:#d6eef2;border:1px solid #41616e;font-weight:650}#creadorModo button[aria-pressed=true]{background:#173c46;color:#8cecef;border-color:#75dce0;box-shadow:inset 0 -2px #75dce0}#alternativasPanel{position:static;max-height:32vh;padding:4px 5px 2px;border:0;border-radius:0;box-shadow:none;background:none}#alternativasPanel header{font-size:14px;margin:0 0 5px}#alternativasCerrar{min-width:44px;min-height:44px;color:#d6eef2;background:#183642;border:1px solid #41616e;border-radius:10px}#alternativasPanel label{display:flex;align-items:center;gap:8px;font-size:13px}#alternativasActividad{flex:1;min-height:44px;background:#183642;color:#e7f6f8;border:1px solid #41616e;border-radius:9px;padding:4px 8px;font:inherit;color-scheme:dark}#alternativasEstado{font-size:14px;margin:7px 0 2px;color:#bde5e8}#alternativasLista{margin-top:5px;gap:5px}.alternativa{padding:7px 10px;min-height:44px}#alternativasPanel{max-height:none;overflow:visible;min-height:0}#creadorDock{box-sizing:border-box}
+ #alternativasLista.compact-preview{display:grid;gap:6px}
+ .alternativaOpciones,.alternativaAcciones{display:grid;gap:6px}
+ .alternativaOpciones{grid-auto-flow:column;grid-auto-columns:minmax(0,1fr)}
+@@ -697,9 +695,15 @@ body.despejado #compass b{font-size:22px}
+  display:none;
+ }
+ body.creating-route #creadorDock:has(.compact-preview){
+- max-height:calc(100% - 24px);overflow:auto;overscroll-behavior:contain;
++ bottom:12px;max-height:calc(100% - 24px);overflow:auto;overscroll-behavior:contain;
+ }
+ body.creating-route:has(.compact-preview) :is(#elevationPanel,.modes){visibility:hidden}
++@media (orientation:landscape) and (max-height:520px){
++ body.creating-route #creadorDock:not(:has(.compact-preview)){
++  display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);align-items:center;
++ }
++ #alternativasPanel{grid-column:1/-1}
++}
+ #alternativasEstado.aviso-btt{color:#ffc083;font-weight:700}
+ #plannerStatus button + button{margin-left:5px}
+ #routeListScope{grid-template-columns:repeat(2,minmax(0,1fr))}
