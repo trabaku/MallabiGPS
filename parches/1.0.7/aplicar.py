@@ -117,3 +117,12 @@ replace("scripts/test-browser.cjs",
         await q.locator('#alternativasActividad').selectOption('foot');""")
 replace("scripts/test-browser.cjs", "creador único sin selector ni aviso fijo",
         "creador con actividad Senderismo y sin aviso fijo")
+
+# El paquete de pruebas puede convivir con la app anterior. Su proveedor
+# GPX tiene que usar la misma identidad que el paquete instalado.
+replace("android/app/src/main/AndroidManifest.xml",
+        'android:authorities="com.trabakutik.mallabigps.fileprovider"',
+        'android:authorities="${applicationId}.fileprovider"')
+replace("android/app/src/main/java/com/trabakutik/gps/MainActivity.java",
+        'MainActivity.this,"com.trabakutik.mallabigps.fileprovider",f',
+        'MainActivity.this,getPackageName()+".fileprovider",f')

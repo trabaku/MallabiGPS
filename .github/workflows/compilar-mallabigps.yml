@@ -101,6 +101,7 @@ jobs:
           "$tools/apksigner" verify --verbose --print-certs "$apk"
           "$tools/zipalign" -c -P 16 4 "$apk"
           "$tools/aapt" dump badging "$apk" | grep -F "package: name='$pkg'"
+          "$tools/aapt" dump xmltree "$apk" AndroidManifest.xml | grep -F "$pkg.fileprovider"
           mkdir -p dist
           cp "$apk" "dist/$name.apk"
           cd dist
