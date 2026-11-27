@@ -1,4 +1,4 @@
-name: Compilar MallabiGPS 1.0.12 pruebas independientes
+name: Compilar MallabiGPS 1.0.13 pruebas independientes
 on:
   push:
     paths:
@@ -8,6 +8,7 @@ on:
       - 'parches/1.0.10/**'
       - 'parches/1.0.11/**'
       - 'parches/1.0.12/**'
+      - 'parches/1.0.13/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -31,6 +32,7 @@ jobs:
           git apply --directory=MallabiGPS-integracion parches/1.0.10/creador-btt.patch
           git apply --directory=MallabiGPS-integracion parches/1.0.11/buscar-rutas-en-mapa.patch
           git apply --directory=MallabiGPS-integracion parches/1.0.12/panel-alternativas.patch
+          git apply --directory=MallabiGPS-integracion parches/1.0.13/solo-audio-pantalla-bloqueada.patch
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -87,8 +89,8 @@ jobs:
           unset MALLABI_FIRMA_OBLIGATORIA MALLABI_FIRMA_CLAVE MALLABI_FIRMA_ALIAS
           # APK de pruebas separada: Android exige una firma, se usa debug.
           # No puede sustituir la app instalada ni el navegador original.
-          pkg=com.trabakutik.mallabigps.pruebas112
-          name=MallabiGPS-1.0.12-pruebas
+          pkg=com.trabakutik.mallabigps.pruebas113
+          name=MallabiGPS-1.0.13-pruebas
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -96,7 +98,7 @@ jobs:
           assert len(files)==1
           p=files[0]
           s=p.read_text()
-          s,n=re.subn(r'(applicationId\s*(?:=\s*)?["\x27])com\.trabakutik\.mallabigps(?:\.pruebas)?(["\x27])',r'\g<1>com.trabakutik.mallabigps.pruebas112\2',s)
+          s,n=re.subn(r'(applicationId\s*(?:=\s*)?["\x27])com\.trabakutik\.mallabigps(?:\.pruebas)?(["\x27])',r'\g<1>com.trabakutik.mallabigps.pruebas113\2',s)
           assert n>=1
           s=re.sub(r'applicationIdSuffix\s*(?:=\s*)?["\x27][^"\x27]+["\x27]','',s)
           p.write_text(s)
@@ -114,7 +116,7 @@ jobs:
           sha256sum *.apk > SHA256.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: MallabiGPS-1.0.12-APK-pruebas
+          name: MallabiGPS-1.0.13-APK-pruebas
           path: MallabiGPS-integracion/dist/
           if-no-files-found: error
       - name: Limpiar clave
@@ -130,7 +132,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: MallabiGPS-1.0.12-APK-pruebas
+          name: MallabiGPS-1.0.13-APK-pruebas
           path: dist
       - name: Publicar descarga directa de la APK
         env:
@@ -139,8 +141,8 @@ jobs:
           set -euo pipefail
           cd dist
           sha256sum -c SHA256.txt
-          tag="v1.0.12-pruebas-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          gh release create "$tag" MallabiGPS-1.0.12-pruebas.apk SHA256.txt \
+          tag="v1.0.13-pruebas-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gh release create "$tag" MallabiGPS-1.0.13-pruebas.apk SHA256.txt \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --prerelease --latest=false --title "MallabiGPS 1.0.12 · APK de pruebas" \
-            --notes "Compara las rutas por color en una fila y controla la selección en otra. Mantiene visible el aviso de pendiente. Instalación independiente de pruebas."
+            --prerelease --latest=false --title "MallabiGPS 1.0.13 · APK de pruebas" \
+            --notes "Quita el icono de bici y senderismo del mapa. Con la pantalla bloqueada, los giros se anuncian por voz y pitidos sin abrir una ficha. Instalación independiente de pruebas."

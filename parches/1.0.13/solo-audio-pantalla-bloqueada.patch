@@ -1,0 +1,880 @@
+diff --git a/android/app/build.gradle.kts b/android/app/build.gradle.kts
+index ef007b8..bef788c 100644
+--- a/android/app/build.gradle.kts
++++ b/android/app/build.gradle.kts
+@@ -2,7 +2,7 @@ plugins { id("com.android.application") }
+ android {
+  namespace = "com.trabakutik.gps"
+  compileSdk = 35
+- defaultConfig { applicationId = "com.trabakutik.mallabigps"; minSdk = 26; targetSdk = 35; versionCode = 156; versionName = "1.0.12" }
++ defaultConfig { applicationId = "com.trabakutik.mallabigps"; minSdk = 26; targetSdk = 35; versionCode = 157; versionName = "1.0.13" }
+  compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+  // Firma independiente de MallabiGPS, nunca la del navegador antiguo.
+  val llaveFija = rootProject.file("firma/mallabi.p12")
+diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
+index 9ade176..a4a3bce 100644
+--- a/android/app/src/main/AndroidManifest.xml
++++ b/android/app/src/main/AndroidManifest.xml
+@@ -24,14 +24,6 @@
+        Aqui no hay layouts por orientacion que cambiar -la interfaz se monta
+        en codigo y los dos WebView se redimensionan solos-, asi que lo
+        correcto es que la Activity sobreviva al cambio. -->
+-  <!-- LA PANTALLA DEL CRUCE (23 nov 2026). Se enciende sola por encima del
+-       bloqueo y se cierra sola; no sale en recientes y no deja rastro. No
+-       lleva WebView: dibuja en Java, para no despertar la pagina. -->
+-  <activity android:name=".GiroActivity" android:exported="false"
+-   android:launchMode="singleTop" android:excludeFromRecents="true" android:noHistory="true"
+-   android:showWhenLocked="true" android:turnScreenOn="true"
+-   android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen"
+-   android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|density|uiMode"/>
+   <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop"
+    android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|density|uiMode">
+    <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+diff --git a/android/app/src/main/java/com/trabakutik/gps/GiroActivity.java b/android/app/src/main/java/com/trabakutik/gps/GiroActivity.java
+deleted file mode 100644
+index c731d85..0000000
+--- a/android/app/src/main/java/com/trabakutik/gps/GiroActivity.java
++++ /dev/null
+@@ -1,250 +0,0 @@
+-package com.trabakutik.gps;
+-
+-import android.app.Activity;
+-import android.content.Context;
+-import android.content.Intent;
+-import android.graphics.Canvas;
+-import android.graphics.Color;
+-import android.graphics.Paint;
+-import android.graphics.Path;
+-import android.graphics.RectF;
+-import android.os.Build;
+-import android.os.Bundle;
+-import android.os.Handler;
+-import android.os.Looper;
+-import android.view.View;
+-import android.view.WindowManager;
+-import android.widget.FrameLayout;
+-
+-/**
+- * LA PANTALLA DEL CRUCE (23 nov 2026). Lo pidio el autor para llevar el movil
+- * en el soporte de la bici: «lo que quiero es que de un vistazo pueda ver
+- * donde tengo que ir... tiene que ser un giro, un dibujo, algo que se entienda
+- * de un plumazo».
+- *
+- * Se enciende sola al acercarse al cruce, por encima del bloqueo, y se cierra
+- * sola. NO ABRE EL NAVEGADOR: dibuja aqui mismo, en Java. Despertar la pagina
+- * es lo que costaba la bateria -de 10 %/h se bajo a 5,5 durmiendola-, asi que
+- * esto no la toca: ni mapa, ni teselas, ni red.
+- *
+- * Lo que se ve: la flecha del giro lo mas grande que cabe, los metros, y el
+- * lado en una palabra. El croquis del cruce SOLO si hay algun ramal que te
+- * pueda engañar; en una curva del camino no sale, que si sale siempre deja de
+- * mirarse. Los ramales llegan relativos a por donde llegas, asi que el dibujo
+- * va con tu marcha hacia arriba y no hay que interpretar nada.
+- *
+- * Todo el dibujo va envuelto: si algo falla, la pantalla se cierra y la
+- * navegacion sigue. Perder un dibujo es barato; perder la ruta no.
+- */
+-public class GiroActivity extends Activity {
+- public static final String EXTRA_LADO="lado",EXTRA_GRADOS="grados",EXTRA_METROS="metros",
+-   EXTRA_TEXTO="texto",EXTRA_RAMALES="ramales",EXTRA_SEGUNDOS="segundos",EXTRA_TIPO="tipo";
+- static final int FONDO=0xFF06121A,CIAN=0xFF66E5FF,BLANCO=0xFFE9FDFF,GRIS=0xFF8FA6B2,RAMAL=0xFF5D7079;
+- final Handler cierra=new Handler(Looper.getMainLooper());
+- // LA FICHA SE VA CUANDO PASAS EL CRUCE. El servicio le va dando cuerda
+- // («giroHasta») mientras el cruce siga por delante; en cuanto deja de
+- // darsela -lo has pasado, te has salido o se acabo la navegacion- esto lo
+- // ve y cierra. Antes solo habia un reloj a ciegas de 12 s: parado en el
+- // cruce se quedaba los doce enteros y con cruces seguidos se solapaban unas
+- // fichas con otras. El autor, el 24 de noviembre de 2026: «no se va de la
+- // pantalla de cruces... o tarda demasiado en irse».
+- final Handler cuerda=new Handler(Looper.getMainLooper());
+- final Runnable miraCuerda=new Runnable(){@Override public void run(){
+-  try{
+-   long hasta=getSharedPreferences("tracking_live",MODE_PRIVATE).getLong("giroHasta",0);
+-   if(hasta>0&&android.os.SystemClock.elapsedRealtime()>hasta){finish();return;}
+-  }catch(Throwable ignored){}
+-  cuerda.postDelayed(this,500);
+- }};
+-
+- public static Intent intent(Context c,int lado,int grados,int metros,String texto,int[] ramales,int segundos){
+-  return intent(c,lado,grados,metros,texto,ramales,segundos,1);
+- }
+- public static Intent intent(Context c,int lado,int grados,int metros,String texto,int[] ramales,int segundos,int tipo){
+-  Intent i=new Intent(c,GiroActivity.class)
+-    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_NO_HISTORY|Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+-  i.putExtra(EXTRA_LADO,lado).putExtra(EXTRA_GRADOS,grados).putExtra(EXTRA_METROS,metros)
+-   .putExtra(EXTRA_TEXTO,texto==null?"":texto).putExtra(EXTRA_SEGUNDOS,segundos).putExtra(EXTRA_TIPO,tipo);
+-  if(ramales!=null&&ramales.length>0)i.putExtra(EXTRA_RAMALES,ramales);
+-  return i;
+- }
+-
+- @Override protected void onCreate(Bundle b){
+-  super.onCreate(b);
+-  try{
+-   if(Build.VERSION.SDK_INT>=27){setShowWhenLocked(true);setTurnScreenOn(true);}
+-   getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+-     |WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
+-   FrameLayout raiz=new FrameLayout(this);
+-   raiz.setBackgroundColor(FONDO);
+-   raiz.addView(new Ficha(this,getIntent()));
+-   raiz.setOnClickListener(v->{quitada();finish();});
+-   setContentView(raiz);
+-   int seg=getIntent()!=null?getIntent().getIntExtra(EXTRA_SEGUNDOS,12):12;
+-   cierra.postDelayed(this::finish,Math.max(3,Math.min(40,seg))*1000L);
+-   cuerda.postDelayed(miraCuerda,1000);
+-  }catch(Throwable t){android.util.Log.w("TrabakutikGPS","Pantalla del cruce",t);finish();}
+- }
+- @Override protected void onNewIntent(Intent i){
+-  super.onNewIntent(i);setIntent(i);
+-  try{cierra.removeCallbacksAndMessages(null);
+-   FrameLayout raiz=new FrameLayout(this);raiz.setBackgroundColor(FONDO);
+-   raiz.addView(new Ficha(this,i));raiz.setOnClickListener(v->{quitada();finish();});setContentView(raiz);
+-   int seg=i!=null?i.getIntExtra(EXTRA_SEGUNDOS,12):12;
+-   cierra.postDelayed(this::finish,Math.max(3,Math.min(40,seg))*1000L);
+-   cuerda.removeCallbacksAndMessages(null);cuerda.postDelayed(miraCuerda,1000);
+-  }catch(Throwable t){android.util.Log.w("TrabakutikGPS","Pantalla del cruce",t);finish();}
+- }
+- /** Quitada con el dedo: no vuelve a salir en medio minuto, para poder
+-  *  mirar el mapa o marcar con ✋ sin que el siguiente cruce la reabra. */
+- static final long GIRO_CALLA_MS=30000;
+- void quitada(){
+-  try{getSharedPreferences("tracking_live",MODE_PRIVATE).edit()
+-    .putLong("giroCallaHasta",android.os.SystemClock.elapsedRealtime()+GIRO_CALLA_MS).apply();}
+-  catch(Throwable ignored){}
+- }
+- @Override protected void onDestroy(){cierra.removeCallbacksAndMessages(null);cuerda.removeCallbacksAndMessages(null);super.onDestroy();}
+-
+- /** El dibujo. Nada de layouts: una vista que se pinta sola. */
+- static class Ficha extends View {
+-  final int lado,grados,metros,tipo;final String texto;final int[] ramales;
+-  final Paint trazo=new Paint(Paint.ANTI_ALIAS_FLAG),relleno=new Paint(Paint.ANTI_ALIAS_FLAG),
+-    letra=new Paint(Paint.ANTI_ALIAS_FLAG);
+-  Ficha(Context c,Intent i){
+-   super(c);
+-   lado=i==null?1:i.getIntExtra(EXTRA_LADO,1);
+-   grados=i==null?90:Math.max(0,Math.min(180,i.getIntExtra(EXTRA_GRADOS,90)));
+-   metros=i==null?0:Math.max(0,i.getIntExtra(EXTRA_METROS,0));
+-   tipo=i==null?1:i.getIntExtra(EXTRA_TIPO,1);
+-   texto=i==null?"":String.valueOf(i.getStringExtra(EXTRA_TEXTO));
+-   int[] r=i==null?null:i.getIntArrayExtra(EXTRA_RAMALES);
+-   ramales=r==null?new int[0]:r;
+-   trazo.setStyle(Paint.Style.STROKE);trazo.setStrokeCap(Paint.Cap.ROUND);trazo.setStrokeJoin(Paint.Join.ROUND);
+-   letra.setTextAlign(Paint.Align.CENTER);letra.setFakeBoldText(true);
+-  }
+-  @Override protected void onDraw(Canvas g){
+-   try{pinta(g);}catch(Throwable t){android.util.Log.w("TrabakutikGPS","Dibujo del cruce",t);}
+-  }
+-  void pinta(Canvas g){
+-   final int w=getWidth(),h=getHeight();
+-   if(w<=0||h<=0)return;
+-   // UNA ROTONDA SE DIBUJA COMO UNA ROTONDA. Antes caia en el dibujo de
+-   // giro corriente -gradosDelGiro() devolvia 90 para el tipo 5- y el autor
+-   // veia una flecha de giro a la izquierda donde el texto decia «Rotonda,
+-   // 4.ª salida»: «me ha marcado, en vez de la cuarta salida, un dibujo de
+-   // giro a la izquierda directamente». El anillo ya ensena las bocas, asi
+-   // que no lleva croquis aparte.
+-   final boolean esRotonda=tipo==5;
+-   final boolean croquis=ramales.length>0&&!esRotonda;
+-   // Reparto del alto: la flecha manda. Con croquis se le deja un cuarto.
+-   final float altoFlecha=h*(croquis?0.40f:0.52f);
+-   final float cxF=w/2f,cyF=h*(croquis?0.055f:0.085f)+altoFlecha/2f;
+-   if(esRotonda)rotonda(g,cxF,cyF,Math.min(w*0.78f,altoFlecha));
+-   else flecha(g,cxF,cyF,Math.min(w*0.78f,altoFlecha));
+-   // Los metros, lo mas grande que cabe.
+-   float yNum=cyF+altoFlecha/2f+h*(croquis?0.085f:0.115f);
+-   letra.setColor(Color.WHITE);letra.setTextSize(h*(croquis?0.105f:0.135f));
+-   g.drawText(metros+" m",cxF,yNum,letra);
+-   // El lado, en una palabra.
+-   letra.setColor(CIAN);letra.setTextSize(h*(croquis?0.042f:0.050f));
+-   g.drawText(texto==null?"":texto,cxF,yNum+h*(croquis?0.055f:0.068f),letra);
+-   if(!croquis)return;
+-   float ladoC=Math.min(w*0.52f,h*0.24f);
+-   float cyC=h*0.80f;
+-   croquis(g,cxF,cyC,ladoC);
+-   letra.setColor(GRIS);letra.setTextSize(h*0.028f);
+-   int n=ramales.length+1;
+-   g.drawText(n+(n==1?" ramal":" ramales")+" · tú por donde marca la flecha",cxF,h*0.955f,letra);
+-  }
+-  /** La rotonda: el anillo, por donde entras abajo, el arco que recorres y
+-   *  tu salida con punta. SE CIRCULA POR LA DERECHA, o sea al reves de las
+-   *  agujas del reloj visto desde arriba: entrando por abajo se va hacia la
+-   *  derecha del dibujo, que es lo que se ve al llegar. Las otras bocas, en
+-   *  gris, para contar las salidas de un vistazo. */
+-  void rotonda(Canvas g,float cx,float cy,float tam){
+-   float t=Math.max(10f,tam);
+-   float R=t*0.30f,fuera=t*0.22f,grosor=Math.max(3f,t*0.085f);
+-   // Las otras bocas.
+-   trazo.setColor(RAMAL);trazo.setStrokeWidth(grosor);
+-   for(int r:ramales){
+-    double a=Math.toRadians(r);
+-    float sx=(float)Math.sin(a),sy=(float)-Math.cos(a);
+-    g.drawLine(cx+sx*R,cy+sy*R,cx+sx*(R+fuera),cy+sy*(R+fuera),trazo);
+-   }
+-   // El anillo.
+-   trazo.setColor(GRIS);trazo.setStrokeWidth(Math.max(2f,grosor*0.7f));
+-   g.drawCircle(cx,cy,R,trazo);
+-   // Por donde llegas, abajo.
+-   trazo.setColor(BLANCO);trazo.setStrokeWidth(grosor*1.5f);
+-   g.drawLine(cx,cy+R,cx,cy+R+fuera*1.3f,trazo);
+-   // El arco recorrido. En grados de Android el 0 son las tres y se crece en
+-   // el sentido del reloj; el rumbo b son b-90 grados, y entrando por abajo
+-   // (rumbo 180, o sea 90) se va RESTANDO hasta la salida.
+-   float s=Math.max(-170,Math.min(170,grados*(lado<0?-1:1)));
+-   RectF caja=new RectF(cx-R,cy-R,cx+R,cy+R);
+-   Path arco=new Path();
+-   arco.addArc(caja,90f,s-180f);
+-   g.drawPath(arco,trazo);
+-   // Tu salida, con punta.
+-   double a=Math.toRadians(s);
+-   float dx=(float)Math.sin(a),dy=(float)-Math.cos(a);
+-   float ex=cx+dx*R,ey=cy+dy*R,px=ex+dx*fuera*1.3f,py=ey+dy*fuera*1.3f;
+-   g.drawLine(ex,ey,px-dx*grosor,py-dy*grosor,trazo);
+-   float cab=t*0.13f,nx=-dy,ny=dx;
+-   Path punta=new Path();
+-   punta.moveTo(px+dx*cab*0.9f,py+dy*cab*0.9f);
+-   punta.lineTo(px-dx*cab*0.5f+nx*cab*0.8f,py-dy*cab*0.5f+ny*cab*0.8f);
+-   punta.lineTo(px-dx*cab*0.5f-nx*cab*0.8f,py-dy*cab*0.5f-ny*cab*0.8f);
+-   punta.close();
+-   relleno.setStyle(Paint.Style.FILL);relleno.setColor(BLANCO);
+-   g.drawPath(punta,relleno);
+-  }
+-  /** La flecha del giro: sube, tuerce «grados» hacia «lado» y acaba en punta. */
+-  void flecha(Canvas g,float cx,float cy,float tam){
+-   float t=Math.max(10f,tam);
+-   float grosor=t*0.17f;
+-   trazo.setStrokeWidth(grosor);trazo.setColor(BLANCO);
+-   float r=t*0.17f;                     // radio de la curva
+-   float entra=t*0.30f,sale=t*0.26f;    // tramo recto antes y despues
+-   float a=(float)Math.toRadians(grados)*(lado<0?-1:1);
+-   float ox=cx+r*(lado<0?-1:1),oy=cy;   // centro de la curva
+-   // El punto donde acaba la curva, girando (cx,cy) alrededor de (ox,oy).
+-   float ex=(float)(ox+(cx-ox)*Math.cos(a)-(cy-oy)*Math.sin(a));
+-   float ey=(float)(oy+(cx-ox)*Math.sin(a)+(cy-oy)*Math.cos(a));
+-   float dx=(float)Math.sin(a),dy=(float)-Math.cos(a);
+-   float px=ex+dx*sale,py=ey+dy*sale;
+-   Path p=new Path();
+-   p.moveTo(cx,cy+entra);p.lineTo(cx,cy);
+-   RectF caja=new RectF(ox-r,oy-r,ox+r,oy+r);
+-   float desde=lado<0?0f:180f;
+-   p.arcTo(caja,desde,(lado<0?1:-1)*(-grados),false);
+-   p.lineTo(px-dx*grosor*0.6f,py-dy*grosor*0.6f);
+-   g.drawPath(p,trazo);
+-   // La punta.
+-   float cab=t*0.17f,nx=-dy,ny=dx;
+-   Path punta=new Path();
+-   punta.moveTo(px+dx*cab*0.9f,py+dy*cab*0.9f);
+-   punta.lineTo(px-dx*cab*0.5f+nx*cab*0.85f,py-dy*cab*0.5f+ny*cab*0.85f);
+-   punta.lineTo(px-dx*cab*0.5f-nx*cab*0.85f,py-dy*cab*0.5f-ny*cab*0.85f);
+-   punta.close();
+-   relleno.setStyle(Paint.Style.FILL);relleno.setColor(BLANCO);
+-   g.drawPath(punta,relleno);
+-  }
+-  /** El croquis: tu llegada abajo, tu salida en el angulo del giro, y los
+-   *  otros ramales en gris. Todo con tu marcha hacia arriba. */
+-  void croquis(Canvas g,float cx,float cy,float tam){
+-   float L=tam*0.46f;
+-   trazo.setColor(RAMAL);trazo.setStrokeWidth(Math.max(4f,tam*0.075f));
+-   for(int r:ramales){
+-    double a=Math.toRadians(r);
+-    g.drawLine(cx,cy,cx+(float)(Math.sin(a)*L),cy-(float)(Math.cos(a)*L),trazo);
+-   }
+-   trazo.setColor(CIAN);trazo.setStrokeWidth(Math.max(5f,tam*0.095f));
+-   g.drawLine(cx,cy,cx,cy+L,trazo);                       // por donde llegas
+-   double s=Math.toRadians(grados*(lado<0?-1:1));
+-   g.drawLine(cx,cy,cx+(float)(Math.sin(s)*L),cy-(float)(Math.cos(s)*L),trazo); // por donde sales
+-   relleno.setStyle(Paint.Style.FILL);relleno.setColor(Color.WHITE);
+-   g.drawCircle(cx,cy,Math.max(4f,tam*0.055f),relleno);
+-  }
+- }
+-}
+diff --git a/android/app/src/main/java/com/trabakutik/gps/MainActivity.java b/android/app/src/main/java/com/trabakutik/gps/MainActivity.java
+index c02a6a0..53e59dc 100644
+--- a/android/app/src/main/java/com/trabakutik/gps/MainActivity.java
++++ b/android/app/src/main/java/com/trabakutik/gps/MainActivity.java
+@@ -2,7 +2,6 @@ package com.trabakutik.gps;
+ import android.Manifest;
+ import android.app.Activity;
+ import android.app.AlertDialog;
+-import android.app.NotificationManager;
+ import android.content.*;
+ import android.content.pm.PackageManager;
+ import android.location.Location;
+@@ -789,44 +788,6 @@ public class MainActivity extends Activity {
+   // La pagina decide si vas al reves comparando tu rumbo con el del tramo.
+   // El servicio lo necesita para sus avisos con la pantalla apagada. No
+   // arranca nada: si no hay servicio vivo, no hay a quien avisar.
+-  // LA PANTALLA DEL CRUCE, encendida o apagada desde la pagina (23 nov 2026).
+-  // Se guarda donde el resto de los ajustes del servicio, asi que sobrevive a
+-  // cerrar la aplicacion. De serie, apagada.
+-  @JavascriptInterface public void setPantallaCruces(boolean on){
+-   try{getSharedPreferences("tracking_live",MODE_PRIVATE).edit().putBoolean("pantallaCruces",on).apply();}
+-   catch(Exception e){android.util.Log.w("TrabakutikGPS","No se pudo guardar la pantalla de cruces",e);}
+-  }
+-  @JavascriptInterface public boolean getPantallaCruces(){
+-   try{return getSharedPreferences("tracking_live",MODE_PRIVATE).getBoolean("pantallaCruces",false);}
+-   catch(Exception e){return false;}
+-  }
+-  // Desde Android 14 el permiso de pantalla completa esta reservado a
+-  // llamadas y alarmas. Si no lo hay, la pagina lo dice en vez de callarse.
+-  @JavascriptInterface public boolean puedePantallaCruces(){
+-   try{
+-    if(Build.VERSION.SDK_INT<29)return true;
+-    NotificationManager nm=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);
+-    return Build.VERSION.SDK_INT<34||nm==null||nm.canUseFullScreenIntent();
+-   }catch(Exception e){return true;}
+-  }
+-  // Y SE LE LLEVA AL SITIO, que buscarlo en Ajustes es un mal arreglo.
+-  // Android 14 trae una pantalla exacta para este permiso
+-  // (ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT). Si el movil no la tiene, o
+-  // falla, se abre la ficha de la aplicacion, que siempre existe.
+-  @JavascriptInterface public void abreAjustesPantalla(){
+-   android.net.Uri yo=android.net.Uri.parse("package:"+getPackageName());
+-   try{
+-    if(Build.VERSION.SDK_INT>=34){
+-     startActivity(new Intent("android.settings.MANAGE_APP_USE_FULL_SCREEN_INTENT",yo)
+-       .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+-     return;
+-    }
+-   }catch(Exception ignored){}
+-   try{
+-    startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,yo)
+-      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+-   }catch(Exception e){android.util.Log.w("TrabakutikGPS","No se pudieron abrir los ajustes",e);}
+-  }
+   @JavascriptInterface public void setSentido(int s){
+    try{
+     if(!TrackingService.ACTIVO)return;
+diff --git a/android/app/src/main/java/com/trabakutik/gps/TrackingService.java b/android/app/src/main/java/com/trabakutik/gps/TrackingService.java
+index b7c9d7a..9db154a 100644
+--- a/android/app/src/main/java/com/trabakutik/gps/TrackingService.java
++++ b/android/app/src/main/java/com/trabakutik/gps/TrackingService.java
+@@ -67,7 +67,7 @@ public class TrackingService extends Service implements LocationListener {
+   int n=0;for(File f:all)if(cierraGpxSiQuedoAbierto(f))n++;
+   return n;
+  }
+- @Override public void onCreate(){super.onCreate();manager=(LocationManager)getSystemService(LOCATION_SERVICE);audioModo=getSharedPreferences("tracking_live",MODE_PRIVATE).getString("audioModo","voz");arrancaVoz();((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(new NotificationChannel(channel,"Grabación de rutas",NotificationManager.IMPORTANCE_LOW));creaCanalCaida();creaCanalGiro();avisoHandler.postDelayed(refrescaAviso,5000);}
++ @Override public void onCreate(){super.onCreate();manager=(LocationManager)getSystemService(LOCATION_SERVICE);audioModo=getSharedPreferences("tracking_live",MODE_PRIVATE).getString("audioModo","voz");arrancaVoz();((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(new NotificationChannel(channel,"Grabación de rutas",NotificationManager.IMPORTANCE_LOW));creaCanalCaida();avisoHandler.postDelayed(refrescaAviso,5000);}
+  final Runnable refrescaAviso=new Runnable(){
+   @Override public void run(){
+    if(!active)return;
+@@ -222,25 +222,6 @@ public class TrackingService extends Service implements LocationListener {
+   int cola=!estadoRuta&&SystemClock.elapsedRealtime()<avisoRutaHasta?TextToSpeech.QUEUE_ADD:TextToSpeech.QUEUE_FLUSH;
+   try{voz.speak(texto,cola,null,idFraseVoz());}catch(Exception ignored){}
+  }
+- // Lo que se dibuja en la pantalla del cruce: una palabra y el angulo. El
+- // angulo exacto no viaja en el giro -solo el tipo-, asi que se usa el que
+- // mejor lo representa: una herradura dibuja 160, un cruce 90 y un «sigue por
+- // la derecha» 30. Es un dibujo, no una medida.
+- static int gradosDelGiro(int tipo){
+-  if(tipo==3||tipo==4)return 160;      // herradura
+-  if(tipo==2||tipo==6)return 30;       // sigue por un lado
+-  if(tipo==0)return 70;                // curva
+-  return 90;                           // cruce
+- }
+- static String textoCorto(int lado,int tipo,int salida){
+-  if(tipo==5)return salida>=1?"Rotonda, "+salida+".ª salida":"Rotonda";
+-  if(tipo==7)return "De frente";
+-  if(lado==0)return "Da la vuelta";
+-  String l=lado<0?"Izquierda":"Derecha";
+-  if(tipo==3||tipo==4)return "Herradura "+l.toLowerCase();
+-  if(tipo==2||tipo==6)return "Sigue "+l.toLowerCase();
+-  return l;
+- }
+  void hablaGiro(String instruccion,String siguiente){
+   habla(instruccion);
+   if(siguiente.isEmpty()||!"voz".equals(modoAudio())||!vozLista||voz==null)return;
+@@ -815,77 +796,6 @@ public class TrackingService extends Service implements LocationListener {
+   NotificationChannel canal=nm.getNotificationChannel(CANAL_CAIDA);
+   return canal==null||canal.getImportance()!=NotificationManager.IMPORTANCE_NONE;
+  }
+- // LA PANTALLA DEL CRUCE (23 nov 2026). Apagada de serie: la enciende el
+- // autor para la bici, con el movil en el soporte. Andando no interesa, que
+- // se va mucho mas despacio y la bateria se nota.
+- static final String CANAL_GIRO="giro";
+- static final int NOTIF_GIRO=14;
+- // LA FICHA SE VA CUANDO PASAS EL CRUCE, NO CUANDO SUENA UN RELOJ. Con un
+- // reloj a ciegas, parado en el cruce se queda los segundos enteros y con
+- // cruces seguidos se solapan unas con otras: «o tarda demasiado en irse».
+- // El servicio le va dando cuerda mientras el cruce siga por delante; en
+- // cuanto deja de darsela -lo has pasado, te has salido o se acabo la
+- // navegacion- la ficha se cierra sola en PANTALLA_CUERDA_MS.
+- static final long PANTALLA_CUERDA_MS=4000;
+- long giroCallaHasta(){
+-  try{return getSharedPreferences("tracking_live",MODE_PRIVATE).getLong("giroCallaHasta",0);}
+-  catch(Exception e){return 0;}
+- }
+- void alargaPantallaGiro(){
+-  try{getSharedPreferences("tracking_live",MODE_PRIVATE).edit()
+-    .putLong("giroHasta",SystemClock.elapsedRealtime()+PANTALLA_CUERDA_MS).apply();}
+-  catch(Exception ignored){}
+- }
+- boolean pantallaCruces(){
+-  try{return getSharedPreferences("tracking_live",MODE_PRIVATE).getBoolean("pantallaCruces",false);}
+-  catch(Exception e){return false;}
+- }
+- void creaCanalGiro(){
+-  try{
+-   NotificationChannel c=new NotificationChannel(CANAL_GIRO,"Pantalla en los cruces",NotificationManager.IMPORTANCE_HIGH);
+-   c.setDescription("Enciende la pantalla al llegar a un cruce, para verlo en el soporte de la bici");
+-   c.enableVibration(false);c.setSound(null,null);
+-   ((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(c);
+-  }catch(Exception ignored){}
+- }
+- // Se abre con una notificacion de pantalla completa, igual que el aviso de
+- // caida: desde Android 10 un servicio no puede abrir una Activity a secas.
+- // Si Android ha quitado ese permiso -desde la 14 lo reserva para llamadas y
+- // alarmas-, queda la notificacion, que al menos se asoma.
+- void abrePantallaGiro(int lado,int tipo,int salida,int metros,int[] ramales,int grados,int segundos){
+-  try{
+-   if(!pantallaCruces())return;
+-   // SI LA ACABAS DE QUITAR CON EL DEDO, NO VUELVE ENSEGUIDA. Antes aqui
+-   // habia un «con la aplicacion delante, no se abre», y eso la dejo MUDA:
+-   // el autor va con la aplicacion delante en el soporte de la bici, no con
+-   // el movil dormido, asi que no le salio ni una. «En la ultima
+-   // actualizacion me ha dejado de salir la pantalla de los cruces.» Lo que
+-   // hacia falta no era callarla, sino poder quitarsela de encima: tocando
+-   // la ficha se cierra y no vuelve en GIRO_CALLA_MS, que es tiempo de sobra
+-   // para mirar el mapa o marcar con ✋.
+-   if(SystemClock.elapsedRealtime()<giroCallaHasta())return;
+-   String texto=textoCorto(lado,tipo,salida);
+-   Intent i=GiroActivity.intent(this,lado,grados,metros,texto,ramales,segundos,tipo);
+-   PendingIntent pa=PendingIntent.getActivity(this,45,i,PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
+-   Notification.Builder b=new Notification.Builder(this,CANAL_GIRO)
+-     .setSmallIcon(android.R.drawable.ic_menu_directions)
+-     .setContentTitle(texto+" · "+metros+" m")
+-     .setContentText(ramales!=null&&ramales.length>0?(ramales.length+1)+" ramales":"Cruce")
+-     .setCategory(Notification.CATEGORY_NAVIGATION)
+-     .setAutoCancel(true).setTimeoutAfter(Math.max(6,Math.min(25,segundos))*1000L)
+-     .setFullScreenIntent(pa,true).setContentIntent(pa);
+-   // EL SEGUNDO CRUCE NO ENCENDIA LA PANTALLA. Android solo lanza la
+-   // pantalla completa cuando la notificacion se PUBLICA; si ya hay una viva
+-   // con el mismo numero, la actualiza en silencio y no abre nada. Con dos
+-   // cruces a 50-100 m el segundo no salia: «el segundo no aparece en
+-   // dibujo, me aparece lo que tengo en pantalla». Se retira la anterior y
+-   // se publica de nuevo, que es publicar de verdad.
+-   NotificationManager nm=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);
+-   nm.cancel(NOTIF_GIRO);
+-   nm.notify(NOTIF_GIRO,b.build());
+-   alargaPantallaGiro();
+-  }catch(Throwable t){android.util.Log.w("TrabakutikGPS","Pantalla del cruce",t);}
+- }
+  void creaCanalCaida(){
+   NotificationChannel c=new NotificationChannel(CANAL_CAIDA,"Aviso de caída",NotificationManager.IMPORTANCE_HIGH);
+   c.setDescription("La cuenta atrás de 30 s antes de enviar el SOS");
+@@ -1189,15 +1099,6 @@ public class TrackingService extends Service implements LocationListener {
+  final ConfirmaRamal confirmaRamal=new ConfirmaRamal();
+  final Map<double[],String> hitosDeGiro=new IdentityHashMap<>();
+  final Map<Integer,ConfirmaRamal.Cruce> ramalesIda=new LinkedHashMap<>(),ramalesVuelta=new LinkedHashMap<>();
+- // LOS RAMALES QUE PUEDEN ENGAÑAR, para la pantalla del cruce. Rumbos
+- // relativos a por donde llegas: 0 de frente, negativo a tu izquierda. La
+- // pagina solo los manda cuando hay alguno, asi que un giro sin entrada aqui
+- // es un cruce sin perdida y no se dibuja croquis.
+- final Map<double[],int[]> ramalesDeGiro=new java.util.HashMap<>();
+- // Los grados que giras de verdad en una rotonda («ga» de la pagina). Van
+- // aparte y no en el propio giro porque la casilla 5 del array ya es la
+- // curva nueva y una APK no puede cambiar de forma sin romper las pruebas.
+- final Map<double[],Integer> gradosDeGiro=new java.util.HashMap<>();
+  ConfirmaRamal.Cruce cruceProximo(double along){
+   Map<Integer,ConfirmaRamal.Cruce> candidatos=sentido>0?ramalesIda:ramalesVuelta;
+   ConfirmaRamal.Cruce mejor=null;
+@@ -1222,7 +1123,7 @@ public class TrackingService extends Service implements LocationListener {
+   (lista==turns?ramalesIda:ramalesVuelta).put(indice,new ConfirmaRamal.Cruce(metrics.distance[indice],puntos));
+  }
+  void loadTurns(){
+-  confirmaRamal.reinicia();ramalesIda.clear();ramalesVuelta.clear();hitosDeGiro.clear();ramalesDeGiro.clear();gradosDeGiro.clear();
++  confirmaRamal.reinicia();ramalesIda.clear();ramalesVuelta.clear();hitosDeGiro.clear();
+   turns.clear();turnsReves.clear();warnedTurns.clear();upcomingTurn="";
+   leeGiros(new File(getFilesDir(),"giros-activos.json"),turns);
+   // Los calculados al reves (la pagina nueva los manda aparte): yendo al
+@@ -1286,18 +1187,6 @@ public class TrackingService extends Service implements LocationListener {
+                          :new double[]{at,direction,tipo,salida,recta});
+      String hito=p.optString("ht","").trim();
+      if(!hito.isEmpty())hitosDeGiro.put(turns.get(turns.size()-1),hito.substring(0,Math.min(45,hito.length())));
+-     JSONArray rb=p.optJSONArray("rb");
+-     if(rb!=null&&rb.length()>0&&rb.length()<=8){
+-      int[] rr=new int[rb.length()];boolean vale=true;
+-      for(int k=0;k<rb.length();k++){
+-       int g=rb.optInt(k,999);
+-       if(g<-180||g>180){vale=false;break;}
+-       rr[k]=g;
+-      }
+-      if(vale)ramalesDeGiro.put(turns.get(turns.size()-1),rr);
+-     }
+-     int ga=p.optInt("ga",-1);
+-     if(tipo==5&&ga>=0&&ga<=180)gradosDeGiro.put(turns.get(turns.size()-1),ga);
+     }
+    }
+    // Ordenados por el punto de la ruta al que pertenecen. El recorrido de
+@@ -1497,23 +1386,6 @@ public class TrackingService extends Service implements LocationListener {
+         }
+       }
+      }
+-     // LA PANTALLA DEL CRUCE VA CON EL PRIMER PITIDO, NO CON LA VOZ. Abierta
+-     // con la voz se encendia 18 s antes y los 12 s fijos se le acababan 6 s
+-     // ANTES de llegar: el autor veia el dibujo y luego la pantalla apagada
+-     // justo en el cruce. Con el primer pitido (9 s) y los segundos que
+-     // faltan de verdad mas cuatro, esta encendida AL cruzar, se apaga
+-     // enseguida y gasta lo mismo o menos.
+-     if(!curvaNueva&&!rectaSinNumero&&ahead<=d1&&ahead>=-2){
+-      if(warnedTurns.add((usaReves?"r":"")+mejor+":pant")){
+-       double vp=velocidadSuave>0?velocidadSuave:1.2;
+-       int seg=(int)Math.max(6,Math.min(20,Math.round(ahead/vp)+4));
+-       abrePantallaGiro(lado,tipo,salida,(int)Math.max(0,Math.round(ahead/5)*5),ramalesDeGiro.get(giro),
+-         gradosDeGiro.containsKey(giro)?gradosDeGiro.get(giro):gradosDelGiro(tipo),seg);
+-      }else if(pantallaCruces()){
+-       // Sigue por delante: se le da cuerda para que no se cierre todavia.
+-       alargaPantallaGiro();
+-      }
+-     }
+   }
+   if(!next.equals(upcomingTurn)){upcomingTurn=next;updateNotice();}
+  }
+diff --git a/scripts/test-browser.cjs b/scripts/test-browser.cjs
+index 1338809..0f43c2b 100644
+--- a/scripts/test-browser.cjs
++++ b/scripts/test-browser.cjs
+@@ -313,6 +313,7 @@ async function setup(context) {
+     );
+     assert(await page.locator("#recordStart").isVisible());
+     assert.equal(await page.locator('#gpsState').textContent(),'GPS sin iniciar');
++    assert.equal(await page.locator('#pantallaCruces, #iconoModo').count(),0,'el mapa solo ofrece el control de audio');
+     const audioDrawings=[];
+     for(const modo of ['voz','pitidos','silencio']){
+       assert.equal(await page.locator('#audioMode').getAttribute('data-modo'),modo);
+diff --git a/scripts/test-native-turns.py b/scripts/test-native-turns.py
+index ced187e..2254373 100644
+--- a/scripts/test-native-turns.py
++++ b/scripts/test-native-turns.py
+@@ -18,6 +18,9 @@ def method(signature):
+  while depth:
+   depth += (src[i]=='{')-(src[i]=='}');i+=1
+  return src[a:i]
++turns=method(' void checkTurns(Location l,NavigationMetrics.Projection position)')
++assert 'GiroActivity' not in src and 'abrePantallaGiro' not in turns
++assert 'hablaGiro(' in turns and 'pitidos(' in turns, 'los giros mantienen la voz y los pitidos'
+ code='''package com.trabakutik.gps;
+ import java.util.*;
+ public class NativeTurnsTest {
+@@ -27,19 +30,6 @@ public class NativeTurnsTest {
+  double inicioCurva=Double.NaN,maximoCurva=Double.NaN;long ultimoFixCurva=0;
+  HashSet<String> warnedTurns=new HashSet<>();String upcomingTurn="";int sentido=1;
+  double ultimoProgresoGiro=Double.NaN;long ultimoProgresoGiroMs=0;double velocidadSuave=10;
+- // La pantalla del cruce no se puede abrir aqui: se apunta lo que se le
+- // habria mandado, que es lo que interesa comprobar.
+- Map<double[],int[]> ramalesDeGiro=new HashMap<>();
+- Map<double[],Integer> gradosDeGiro=new HashMap<>();
+- ArrayList<String> pantallas=new ArrayList<>();
+- // La ficha vive mientras el cruce siga por delante: aqui se cuenta cuantas
+- // veces se le ha dado cuerda, que es lo que la mantiene abierta.
+- boolean pantallaCruces(){return true;}
+- int cuerdas=0;
+- void alargaPantallaGiro(){cuerdas++;}
+- void abrePantallaGiro(int lado,int tipo,int salida,int metros,int[] ramales,int grados,int segundos){
+-  pantallas.add(textoCorto(lado,tipo,salida)+"|"+metros+"|"+grados+"|"+(ramales==null?0:ramales.length)+"|"+segundos);
+- }
+  double movSentido=Double.NaN,latSentido=Double.NaN,lonSentido=Double.NaN;
+ '''+re.search(r' static final double AVANCE_DECIDE_M=[^;]+;',src).group(0)+re.search(r' static final double FUERA_M=[^;]+;',src).group(0)+re.search(r' static final long RECUERDA_MS=[^;]+;',src).group(0)+re.search(r' long fueraDesde=0;boolean recordado=false;long ultimoDesvio=0;',src).group(0)+re.search(r' static final double ENTRADA_M=[^;]+;',src).group(0)+re.search(r' static final double SEGUIDO_MIN=[^;]+;',src).group(0)+'''
+  static class SystemClock {static long reloj=1000;static long elapsedRealtime(){return reloj;}}
+@@ -89,7 +79,6 @@ public class NativeTurnsTest {
+  ' String giroSeguido(ArrayList<double[]> turns,int actual,boolean usaReves)',' int seguidoDe(ArrayList<double[]> turns,int actual)',' double seguido()',' double desentenderse()',' double avisoLargo()',' double avisoCorto()',' double avisoVoz()',' double avisoYa()',' double avisoCurva()',
+  ' void decideSentido(double along,double lat,double lon)',' void decideSentido(double along)',' void ponSentido(int s)',
+  ' void olvidaSentido()',' void tonoBien()',' void vuelveALaRuta()',
+- ' static int gradosDelGiro(int tipo)',' static String textoCorto(int lado,int tipo,int salida)',
+  ' static double[] puntoEn(ArrayList<double[]> ruta,double along)',' void protegeAvisoRuta()',' String avisoSalida(Location l)',' void checkDeviation(Location l,boolean ramalEquivocado)',' double closest(double lat,double lon,double[] punto)', ' double closest(double lat,double lon)'))+'''
+  static NativeTurnsTest setup(){NativeTurnsTest c=new NativeTurnsTest();for(int m=0;m<=300;m+=10)c.route.add(new double[]{m/111195.,0});c.turns.add(new double[]{10,-1,1});c.turns.add(new double[]{18,1,1});return c;}
+  static NativeTurnsTest setup2(){NativeTurnsTest c=new NativeTurnsTest();for(int m=0;m<=300;m+=10)c.route.add(new double[]{m/111195.,0});c.turns.add(new double[]{7,-1,1});c.turns.add(new double[]{17,1,1});return c;}
+@@ -166,80 +155,6 @@ public class NativeTurnsTest {
+  // DOS GIROS SEGUIDOS SE DICEN JUNTOS: a 20 m, «y enseguida a la derecha»;
+  // a 80 m, cada uno el suyo. Y al reves de la ruta, el siguiente es el de
+  // atras y con el lado cambiado.
+- // LA PANTALLA DEL CRUCE (23 nov 2026). Lo que se le manda: una palabra, los
+- // metros y cuantos ramales hay. El angulo es para dibujar, no una medida:
+- // una herradura dibuja 160, un cruce 90 y un «sigue por la derecha» 30.
+- static void pantallaDelCruce(){
+-  require(textoCorto(-1,1,0).equals("Izquierda"),"cruce a la izquierda");
+-  require(textoCorto(1,1,0).equals("Derecha"),"cruce a la derecha");
+-  require(textoCorto(-1,3,0).equals("Herradura izquierda"),"herradura con su lado");
+-  require(textoCorto(1,2,0).equals("Sigue derecha"),"sigue por un lado");
+-  require(textoCorto(0,1,0).equals("Da la vuelta"),"sin lado, da la vuelta");
+-  require(textoCorto(1,5,2).equals("Rotonda, 2.ª salida"),"rotonda con su salida");
+-  require(textoCorto(1,5,0).equals("Rotonda"),"rotonda sin numero");
+-  require(textoCorto(0,7,0).equals("De frente"),"de frente");
+-  require(gradosDelGiro(3)==160&&gradosDelGiro(1)==90&&gradosDelGiro(2)==30&&gradosDelGiro(0)==70,
+-    "el angulo que se dibuja segun el tipo");
+-  // Y se manda UNA VEZ por giro, con los metros que faltan, al avisar de voz.
+-  NativeTurnsTest c=new NativeTurnsTest();
+-  for(int m=0;m<=300;m+=10)c.route.add(new double[]{m/111195.,0});
+-  c.turns.add(new double[]{10,1,1});
+-  c.ramalesDeGiro.put(c.turns.get(0),new int[]{90});
+-  for(int m=0;m<=99;m+=5)c.posicion(new Location(m));
+-  require(c.pantallas.size()==1,"una sola pantalla por cruce: "+c.pantallas);
+-  String[] p=c.pantallas.get(0).split("[|]");
+-  require(p[0].equals("Derecha"),"la palabra: "+p[0]);
+-  require(Integer.parseInt(p[1])>0,"los metros que faltan: "+p[1]);
+-  require(p[3].equals("1"),"un ramal que puede engañar: "+p[3]);
+-  // UNA ROTONDA SE DIBUJA CON SUS GRADOS, no con los 90 del tipo. Hasta el 23
+-  // de noviembre de 2026 gradosDelGiro(5) caia en el «return 90» y la pantalla
+-  // pintaba un giro corriente donde el texto decia «Rotonda, 3.ª salida». El
+-  // autor: «me ha marcado, en vez de la cuarta salida, un dibujo de giro a la
+-  // izquierda directamente».
+-  NativeTurnsTest rot=new NativeTurnsTest();
+-  for(int m=0;m<=300;m+=10)rot.route.add(new double[]{m/111195.,0});
+-  rot.turns.add(new double[]{10,-1,5,3,0});
+-  rot.gradosDeGiro.put(rot.turns.get(0),125);
+-  rot.ramalesDeGiro.put(rot.turns.get(0),new int[]{-70,95});
+-  for(int m=0;m<=99;m+=5)rot.posicion(new Location(m));
+-  require(rot.pantallas.size()==1,"una pantalla por rotonda: "+rot.pantallas);
+-  String[] q=rot.pantallas.get(0).split("[|]");
+-  require(q[0].equals("Rotonda, 3.ª salida"),"la palabra de la rotonda: "+q[0]);
+-  require(q[2].equals("125"),"los grados de verdad de la rotonda, no 90: "+q[2]);
+-  require(q[3].equals("2"),"las otras bocas del anillo: "+q[3]);
+-  // Sin ramales que engañen, no se dibuja croquis.
+-  NativeTurnsTest d=new NativeTurnsTest();
+-  for(int m=0;m<=300;m+=10)d.route.add(new double[]{m/111195.,0});
+-  d.turns.add(new double[]{10,-1,1});
+-  for(int m=0;m<=99;m+=5)d.posicion(new Location(m));
+-  require(d.pantallas.size()==1&&d.pantallas.get(0).split("[|]")[3].equals("0"),"sin ramales: "+d.pantallas);
+-  // Y SE ABRE CON EL PRIMER PITIDO, no con la voz, y dura lo que falta mas
+-  // cuatro segundos: a 10 m/s el primer pitido son 102 m, asi que al verlo a
+-  // 100 m quedan diez segundos y la ficha vive catorce. Antes eran doce
+-  // fijos abiertos 18 s antes, y se apagaba 6 s ANTES de llegar al cruce.
+-  require(d.pantallas.get(0).equals("Izquierda|100|90|0|14"),"abierta con el primer pitido y con sus segundos: "+d.pantallas);
+-  // DOS CRUCES SEGUIDOS ENCIENDEN LA PANTALLA DOS VECES. El autor: «si a
+-  // 50-100 metros hay otro cruce se volveria a encender; el segundo no
+-  // aparece en dibujo, me aparece lo que tengo en pantalla».
+-  NativeTurnsTest dos=new NativeTurnsTest();
+-  for(int m=0;m<=300;m+=10)dos.route.add(new double[]{m/111195.,0});
+-  dos.turns.add(new double[]{10,-1,1});
+-  dos.turns.add(new double[]{16,1,1});
+-  for(int m=0;m<=130;m+=5)dos.posicion(new Location(m));
+-  require(dos.pantallas.size()==2,"dos cruces a 60 m, dos pantallas: "+dos.pantallas);
+-  // Y LA FICHA SE CIERRA AL PASAR EL CRUCE, no cuando suena un reloj: se le
+-  // da cuerda en cada posicion mientras el cruce siga por delante y se deja
+-  // de dar en cuanto lo pasas. El autor, el 24 de noviembre de 2026: «no se
+-  // va de la pantalla de cruces... o tarda demasiado en irse».
+-  NativeTurnsTest c2=new NativeTurnsTest();
+-  for(int m=0;m<=300;m+=10)c2.route.add(new double[]{m/111195.,0});
+-  c2.turns.add(new double[]{10,-1,1});
+-  for(int m=0;m<=95;m+=5)c2.posicion(new Location(m));
+-  int antes=c2.cuerdas;
+-  require(antes>=3,"mientras el cruce esta delante se le da cuerda: "+antes);
+-  for(int m=105;m<=160;m+=5)c2.posicion(new Location(m));
+-  require(c2.cuerdas==antes,"pasado el cruce no se le da mas cuerda: "+c2.cuerdas+" vs "+antes);
+- }
+  static void girosSeguidos(){
+   NativeTurnsTest c=new NativeTurnsTest();for(int m=0;m<=300;m+=10)c.route.add(new double[]{m/111195.,0});
+   c.turns.add(new double[]{10,-1,1});c.turns.add(new double[]{12,1,1});c.turns.add(new double[]{20,-1,1});
+@@ -591,7 +506,7 @@ public class NativeTurnsTest {
+   require(c.dicho.equals(Arrays.asList("Ya estás en la ruta")),"Al cambiar de ruta vuelve a anunciar");
+  }
+  public static void main(String[] args){
+-  entradaDeRuta();puntoSimulado();saltoNoEsVuelta();desnivelYCircuito();idaYVuelta();girosSeguidos();pantallaDelCruce();ahoraAntes();System.out.println("PASS: el «ahora» suena cuatro segundos antes de entrar en el cruce");System.out.println("PASS: dos giros a menos de 30 m se dicen juntos");
++  entradaDeRuta();puntoSimulado();saltoNoEsVuelta();desnivelYCircuito();idaYVuelta();girosSeguidos();ahoraAntes();System.out.println("PASS: el «ahora» suena cuatro segundos antes de entrar en el cruce");System.out.println("PASS: dos giros a menos de 30 m se dicen juntos");
+   System.out.println("PASS: el desnivel con umbral de 5 m y el final de un circuito");
+   System.out.println("PASS: un salto de la proyeccion no es dar la vuelta");System.out.println("PASS: el simulador pone la posicion encima de la ruta y para al acabarla");
+   metricsChecks();
+diff --git a/src/js/07-servicio.js b/src/js/07-servicio.js
+index 8c7a03e..2b119cd 100644
+--- a/src/js/07-servicio.js
++++ b/src/js/07-servicio.js
+@@ -654,65 +654,6 @@ function conmutaModoAudio(){
+  if(audioModo==='voz')hablar('Voz activada');
+  else callaYa(audioModo==='silencio');
+ }
+-// LA PANTALLA EN LOS CRUCES (23 nov 2026). Lo pidio el autor para la bici,
+-// con el movil en el soporte: «que de un vistazo pueda ver donde tengo que
+-// ir». Andando no la quiere, que se va mas despacio y la bateria se nota, asi
+-// que nace APAGADA y es el quien la enciende.
+-// El boton solo sale dentro de la aplicacion: desde la web no hay servicio
+-// que encienda nada.
+-let pantallaCruces=false;
+-// EL BOTON DICE QUE ERES, NO QUE HACE (23 nov 2026). Lo dijo el autor al ver
+-// el primero: «el dibujo del recuadro no se sabe para qué es; ¿dibujo una
+-// bici o senderista no es mejor?». Una bici o un caminante se entienden sin
+-// leer, y de paso es la opcion que el pidio desde el principio: bici o
+-// andando. Verde para el senderista es el mismo verde con el que el mapa
+-// pinta las rutas de senderismo, asi que no hay dos idiomas.
+-const DIBUJO_BICI='<circle cx="5.5" cy="17.5" r="3.5"/><circle cx="18.5" cy="17.5" r="3.5"/>'
+- +'<path d="M5.5 17.5 L9.5 8 h5"/><path d="M18.5 17.5 L14 8"/><path d="M8 8h5"/><circle cx="15.5" cy="5" r="1.2"/>';
+-const DIBUJO_ANDANDO='<circle cx="13" cy="4" r="1.8"/><path d="M12 8.5 L9.5 13 L7 21"/>'
+- +'<path d="M12 8.5 L15 12 L16 21"/><path d="M12 9 L16.5 7"/><path d="M9.5 13 L6 10"/>';
+-function pintaPantallaCruces(){
+- const b=$('pantallaCruces');if(!b)return;
+- const hay=!!window.TrabakutikAndroid?.setPantallaCruces;
+- b.hidden=!hay;
+- if(!hay)return;
+- b.setAttribute('aria-pressed',pantallaCruces?'true':'false');
+- if(b.dataset)b.dataset.modo=pantallaCruces?'bici':'andando';
+- const i=$('iconoModo');
+- if(i)i.innerHTML=pantallaCruces?DIBUJO_BICI:DIBUJO_ANDANDO;
+- if(typeof b.setAttribute==='function')b.setAttribute('aria-label',pantallaCruces
+-   ?'Modo: bici. La pantalla se enciende en los cruces'
+-   :'Modo: senderismo. La pantalla no se enciende en los cruces');
+-}
+-function conmutaPantallaCruces(){
+- pantallaCruces=!pantallaCruces;
+- try{localStorage.setItem('trabakutik-pantalla-cruces',pantallaCruces?'1':'0')}catch(e){}
+- try{window.TrabakutikAndroid?.setPantallaCruces?.(pantallaCruces)}catch(e){}
+- pintaPantallaCruces();
+- // Desde Android 14 el permiso de pantalla completa esta reservado a
+- // llamadas y alarmas. Si no lo hay se dice, en vez de que el autor crea que
+- // esta encendido y no se encienda nada en el monte.
+- let puede=true;
+- try{puede=window.TrabakutikAndroid?.puedePantallaCruces?window.TrabakutikAndroid.puedePantallaCruces():true}catch(e){}
+- if(pantallaCruces&&!puede){
+-  // Buscarlo a mano en Ajustes es un mal arreglo: Android 14 tiene una
+-  // pantalla exacta para este permiso y se abre directamente. Una APK
+-  // anterior no la sabe abrir y entonces se dice donde esta.
+-  let llevado=false;
+-  try{if(window.TrabakutikAndroid?.abreAjustesPantalla){window.TrabakutikAndroid.abreAjustesPantalla();llevado=true}}catch(e){}
+-  notice(llevado?'Android pide permiso para encender la pantalla · dáselo y vuelve'
+-    :'Android no deja encender la pantalla a esta aplicación · actívalo en Ajustes → Aplicaciones → Trabakutik GPS');
+-  return;
+- }
+- notice(!pantallaCruces?'Senderismo · la pantalla no se enciende en los cruces'
+-   :'Bici · la pantalla se enciende en cada cruce, para el soporte');
+-}
+-try{
+- const g=localStorage.getItem('trabakutik-pantalla-cruces');
+- if(g==='1'||g==='0')pantallaCruces=g==='1';
+- else if(window.TrabakutikAndroid?.getPantallaCruces)pantallaCruces=!!window.TrabakutikAndroid.getPantallaCruces();
+-}catch(e){}
+-try{window.TrabakutikAndroid?.setPantallaCruces?.(pantallaCruces)}catch(e){}
+ function getAudio(){try{if(!audio)audio=new (window.AudioContext||window.webkitAudioContext)();audio.resume().catch(()=>{})}catch(e){}}
+ // Un grupo de n pitidos agudos, y el numero es el dato: 1 pitido = cruce a
+ // 50 m, 2 = a 10 m, 3 = lo tienes encima, 4 = fuera de ruta. Los cuatro de
+diff --git a/src/js/10-aplicacion.js b/src/js/10-aplicacion.js
+index 62f775a..c0bfac0 100644
+--- a/src/js/10-aplicacion.js
++++ b/src/js/10-aplicacion.js
+@@ -22,10 +22,7 @@ if(!enLaApp){
+  }
+ }
+ $('audioMode').onclick=conmutaModoAudio;pintaModoAudio();
+-// Con typeof: las pruebas que cargan esta pieza sola no traen la 07.
+-if($('pantallaCruces')&&typeof conmutaPantallaCruces==='function'){
+- $('pantallaCruces').onclick=conmutaPantallaCruces;pintaPantallaCruces();
+-}pintaEstadoGps();$('locate').onclick=()=>{followGps=true;manualMapUntil=0;if(position){map.setView(position,Math.max(16,map.getZoom()),{animate:false});if(watch===null)startGPS()}else startGPS();window.trabakutikSyncNative?.();pintaMandos()};
++pintaEstadoGps();$('locate').onclick=()=>{followGps=true;manualMapUntil=0;if(position){map.setView(position,Math.max(16,map.getZoom()),{animate:false});if(watch===null)startGPS()}else startGPS();window.trabakutikSyncNative?.();pintaMandos()};
+ // Esto solo sabia manejar TRANSICIONES: si el servicio no grababa y la pagina
+ // tampoco creia grabar, no entraba en ninguna rama y la botonera se quedaba
+ // como estuviera. El autor se encontro con «Pausar» y «Parar» puestos sin
+diff --git a/src/nuevo.plantilla.html b/src/nuevo.plantilla.html
+index ff6d835..81d33e1 100644
+--- a/src/nuevo.plantilla.html
++++ b/src/nuevo.plantilla.html
+@@ -49,7 +49,7 @@ body.despejado #ffAltBox{grid-column:3}
+ body.despejado .info b::before{content:none}
+ body.despejado .info .ff-lab{white-space:nowrap}
+ @media (max-width:389px){body.despejado #compass svg{width:20px;height:20px}body.despejado #compass b{font-size:13px}body.despejado .info .ff b{font-size:15px}body.despejado .info .ff-lab{font-size:8px;letter-spacing:.06em}}
+-#mapCredit{position:absolute;z-index:620;right:0;bottom:var(--turn-alto,0px);font-size:9px;line-height:1.6;color:#9fb8c6;background:#07131db8;padding:0 5px;border-radius:5px 0 0 0;pointer-events:none}.app-update{display:flex;align-items:center;gap:6px;background:#3a2a0edb;border:1px solid #c98a1f;border-radius:12px;padding:4px 4px 4px 11px;margin-bottom:8px}.app-update.hidden{display:none}.app-update a{flex:1;color:#ffd58a;font-size:12px;font-weight:700;line-height:1.3;text-decoration:none;padding:8px 0;white-space:pre-line}.app-update button{flex:none;min-width:44px;min-height:44px;background:none;border:0;color:#ffd58a;font-size:16px}.solo-app{display:block;background:#15313fdb;border:1px solid #3b6579;border-radius:12px;padding:9px 11px;margin-bottom:8px}.solo-app b{display:block;font-size:12px;color:#bfefff;margin-bottom:3px}.solo-app span{display:block;font-size:10px;line-height:1.45;color:#9fc0d0}.solo-app-baja{display:block;text-align:center;margin-top:8px;background:#92fca8;color:#06271b;font-weight:800;font-size:12px;text-decoration:none;border-radius:10px;padding:9px}#orient[aria-pressed=true]{background:#66e5ff!important;color:#051824!important;border-color:#66e5ff!important}#audioMode[data-modo="voz"]{border-color:#66e5ff!important;color:#66e5ff!important}#pantallaCruces[data-modo="bici"]{border-color:#4a9cf2!important;color:#4a9cf2!important}#pantallaCruces[data-modo="andando"]{border-color:#2ecc71!important;color:#2ecc71!important}#audioMode[data-modo="pitidos"]{border-color:#ffa94d!important;color:#ffa94d!important}#audioMode[data-modo="silencio"]{color:#819ba8!important}.routeitem .btn-sub{padding:6px 7px;font-size:11px;border-radius:8px;background:#173747;border:1px solid #4a7186;color:#d4f7ff;white-space:nowrap}#eye[aria-pressed=true]{background:#ffa94d!important;color:#2b1603!important;border-color:#ffa94d!important}#locate.siguiendo{background:#187cff!important;color:#fff!important;border-color:#187cff!important}.leaflet-container{background:#172d33}.leaflet-control-attribution{font-size:9px!important}.tools{position:absolute;z-index:700;right:10px;top:12px;display:grid;gap:7px}.tools button{width:42px;height:42px;border:1px solid #5a889b7a;border-radius:13px;background:#0d2339ed;color:#d4f7ff;font-size:21px;box-shadow:0 2px 14px #0006}.info{position:absolute;z-index:700;left:10px;top:12px;max-width:calc(100% - 80px);background:#0a1f2edb;border:1px solid #31576a;border-radius:13px;padding:9px 12px;backdrop-filter:blur(12px);pointer-events:none}.info b{display:block;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.info span{display:block;font-size:10px;color:#a5bece;margin-top:4px}.bottom{background:#091925;border-top:1px solid #315265;padding:8px 9px calc(9px + env(safe-area-inset-bottom));flex:none}.modes{display:grid;grid-template-columns:repeat(2,1fr);gap:5px;margin-bottom:8px}.modes button{border:0;border-radius:15px;background:linear-gradient(180deg,#16384a,#0e2433);color:#a9cdda;padding:9px 4px;font-size:12px;font-weight:650;box-shadow:inset 0 1px 0 #ffffff12,0 3px 10px #00000055;transition:transform .08s ease,filter .08s ease}.modes button:active{transform:translateY(1px);filter:brightness(.92)}.modes button[aria-pressed=true]{color:#04202c;background:linear-gradient(180deg,#8bf0ff,#45d2f2);box-shadow:inset 0 1px 0 #ffffffaa,0 5px 18px #4ed7f54d}.actions{display:flex;gap:6px;align-items:center;justify-content:center;min-height:44px}.actions button{min-height:43px;flex:1;padding:9px 8px;border:0;border-radius:15px;background:linear-gradient(180deg,#1d4057,#122b3c);color:#eaf8ff;font-size:12px;font-weight:700;letter-spacing:.2px;box-shadow:inset 0 1px 0 #ffffff1a,inset 0 -1px 0 #00000055,0 3px 10px #00000066;transition:transform .08s ease,filter .08s ease}.actions button:active{transform:translateY(1px);filter:brightness(.92)}.actions button:disabled{box-shadow:none}.actions .go{background:linear-gradient(180deg,#a9ffbd,#62e283);color:#042616;box-shadow:inset 0 1px 0 #ffffff99,inset 0 -1px 0 #00000033,0 5px 18px #4ddc7a4d}.actions .red{background:linear-gradient(180deg,#f4697b,#d83a50);color:#fff;box-shadow:inset 0 1px 0 #ffffff5c,inset 0 -1px 0 #00000038,0 5px 18px #e951644d}.actions .blue{background:linear-gradient(180deg,#4a9cf2,#2176d7);color:#fff;box-shadow:inset 0 1px 0 #ffffff5c,inset 0 -1px 0 #00000038,0 5px 18px #338be94d}.actions .amber{background:linear-gradient(180deg,#ffd089,#f4a63c);color:#2d1804;box-shadow:inset 0 1px 0 #ffffff8a,inset 0 -1px 0 #00000030,0 5px 18px #ffbd694d}#recordStart{font-size:15px;line-height:1.15;padding:8px}#recordStart small{display:block;font-weight:600;font-size:10px;opacity:.72;margin-top:2px}@media (prefers-reduced-motion:reduce){.actions button,.modes button{transition:none}.actions button:active,.modes button:active{transform:none}}.hidden{display:none!important}.status{font-size:10px;color:#a7bfcb;margin-top:6px;text-align:center;min-height:13px}.version{font-size:9px;color:#6d8a98;text-align:center;margin-top:4px}.popup{position:absolute;z-index:900;inset:0;background:#07131dba;display:grid;place-items:end center}.sheet{width:100%;max-height:77%;overflow:auto;background:#102938;border:1px solid #365467;border-radius:19px 19px 0 0;padding:16px 14px 24px}.sheet h2{font-size:16px;margin:0 0 9px}.sheet input{width:100%;border-radius:10px;background:#173747;border:1px solid #638092;color:white;padding:12px;margin-bottom:9px}.sheet button{background:#163a4c;color:white;border:1px solid #4d7385;border-radius:10px;padding:10px}.routeitem{display:flex;justify-content:space-between;align-items:center;width:100%;gap:8px;text-align:left;margin:5px 0;font-size:12px}.routeitem span{font-size:10px;color:#a4c3d2}
++#mapCredit{position:absolute;z-index:620;right:0;bottom:var(--turn-alto,0px);font-size:9px;line-height:1.6;color:#9fb8c6;background:#07131db8;padding:0 5px;border-radius:5px 0 0 0;pointer-events:none}.app-update{display:flex;align-items:center;gap:6px;background:#3a2a0edb;border:1px solid #c98a1f;border-radius:12px;padding:4px 4px 4px 11px;margin-bottom:8px}.app-update.hidden{display:none}.app-update a{flex:1;color:#ffd58a;font-size:12px;font-weight:700;line-height:1.3;text-decoration:none;padding:8px 0;white-space:pre-line}.app-update button{flex:none;min-width:44px;min-height:44px;background:none;border:0;color:#ffd58a;font-size:16px}.solo-app{display:block;background:#15313fdb;border:1px solid #3b6579;border-radius:12px;padding:9px 11px;margin-bottom:8px}.solo-app b{display:block;font-size:12px;color:#bfefff;margin-bottom:3px}.solo-app span{display:block;font-size:10px;line-height:1.45;color:#9fc0d0}.solo-app-baja{display:block;text-align:center;margin-top:8px;background:#92fca8;color:#06271b;font-weight:800;font-size:12px;text-decoration:none;border-radius:10px;padding:9px}#orient[aria-pressed=true]{background:#66e5ff!important;color:#051824!important;border-color:#66e5ff!important}#audioMode[data-modo="voz"]{border-color:#66e5ff!important;color:#66e5ff!important}#audioMode[data-modo="pitidos"]{border-color:#ffa94d!important;color:#ffa94d!important}#audioMode[data-modo="silencio"]{color:#819ba8!important}.routeitem .btn-sub{padding:6px 7px;font-size:11px;border-radius:8px;background:#173747;border:1px solid #4a7186;color:#d4f7ff;white-space:nowrap}#eye[aria-pressed=true]{background:#ffa94d!important;color:#2b1603!important;border-color:#ffa94d!important}#locate.siguiendo{background:#187cff!important;color:#fff!important;border-color:#187cff!important}.leaflet-container{background:#172d33}.leaflet-control-attribution{font-size:9px!important}.tools{position:absolute;z-index:700;right:10px;top:12px;display:grid;gap:7px}.tools button{width:42px;height:42px;border:1px solid #5a889b7a;border-radius:13px;background:#0d2339ed;color:#d4f7ff;font-size:21px;box-shadow:0 2px 14px #0006}.info{position:absolute;z-index:700;left:10px;top:12px;max-width:calc(100% - 80px);background:#0a1f2edb;border:1px solid #31576a;border-radius:13px;padding:9px 12px;backdrop-filter:blur(12px);pointer-events:none}.info b{display:block;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.info span{display:block;font-size:10px;color:#a5bece;margin-top:4px}.bottom{background:#091925;border-top:1px solid #315265;padding:8px 9px calc(9px + env(safe-area-inset-bottom));flex:none}.modes{display:grid;grid-template-columns:repeat(2,1fr);gap:5px;margin-bottom:8px}.modes button{border:0;border-radius:15px;background:linear-gradient(180deg,#16384a,#0e2433);color:#a9cdda;padding:9px 4px;font-size:12px;font-weight:650;box-shadow:inset 0 1px 0 #ffffff12,0 3px 10px #00000055;transition:transform .08s ease,filter .08s ease}.modes button:active{transform:translateY(1px);filter:brightness(.92)}.modes button[aria-pressed=true]{color:#04202c;background:linear-gradient(180deg,#8bf0ff,#45d2f2);box-shadow:inset 0 1px 0 #ffffffaa,0 5px 18px #4ed7f54d}.actions{display:flex;gap:6px;align-items:center;justify-content:center;min-height:44px}.actions button{min-height:43px;flex:1;padding:9px 8px;border:0;border-radius:15px;background:linear-gradient(180deg,#1d4057,#122b3c);color:#eaf8ff;font-size:12px;font-weight:700;letter-spacing:.2px;box-shadow:inset 0 1px 0 #ffffff1a,inset 0 -1px 0 #00000055,0 3px 10px #00000066;transition:transform .08s ease,filter .08s ease}.actions button:active{transform:translateY(1px);filter:brightness(.92)}.actions button:disabled{box-shadow:none}.actions .go{background:linear-gradient(180deg,#a9ffbd,#62e283);color:#042616;box-shadow:inset 0 1px 0 #ffffff99,inset 0 -1px 0 #00000033,0 5px 18px #4ddc7a4d}.actions .red{background:linear-gradient(180deg,#f4697b,#d83a50);color:#fff;box-shadow:inset 0 1px 0 #ffffff5c,inset 0 -1px 0 #00000038,0 5px 18px #e951644d}.actions .blue{background:linear-gradient(180deg,#4a9cf2,#2176d7);color:#fff;box-shadow:inset 0 1px 0 #ffffff5c,inset 0 -1px 0 #00000038,0 5px 18px #338be94d}.actions .amber{background:linear-gradient(180deg,#ffd089,#f4a63c);color:#2d1804;box-shadow:inset 0 1px 0 #ffffff8a,inset 0 -1px 0 #00000030,0 5px 18px #ffbd694d}#recordStart{font-size:15px;line-height:1.15;padding:8px}#recordStart small{display:block;font-weight:600;font-size:10px;opacity:.72;margin-top:2px}@media (prefers-reduced-motion:reduce){.actions button,.modes button{transition:none}.actions button:active,.modes button:active{transform:none}}.hidden{display:none!important}.status{font-size:10px;color:#a7bfcb;margin-top:6px;text-align:center;min-height:13px}.version{font-size:9px;color:#6d8a98;text-align:center;margin-top:4px}.popup{position:absolute;z-index:900;inset:0;background:#07131dba;display:grid;place-items:end center}.sheet{width:100%;max-height:77%;overflow:auto;background:#102938;border:1px solid #365467;border-radius:19px 19px 0 0;padding:16px 14px 24px}.sheet h2{font-size:16px;margin:0 0 9px}.sheet input{width:100%;border-radius:10px;background:#173747;border:1px solid #638092;color:white;padding:12px;margin-bottom:9px}.sheet button{background:#163a4c;color:white;border:1px solid #4d7385;border-radius:10px;padding:10px}.routeitem{display:flex;justify-content:space-between;align-items:center;width:100%;gap:8px;text-align:left;margin:5px 0;font-size:12px}.routeitem span{font-size:10px;color:#a4c3d2}
+ .grabaciones{margin-top:14px;border-top:1px solid #23394a;padding-top:8px}.grabaciones h3{font-size:13px;margin:4px 0 6px;color:#cfe3ee}.grab-vacio{font-size:12px;color:#8fb3c4;margin:4px 0}.grab-txt{font-size:12px;font-variant-numeric:tabular-nums}.grab-ahora{font-size:11px;color:#ff8a8a!important;white-space:nowrap;font-weight:600}.btn-borrar{background:#2a1620!important;border-color:#6d3346!important;color:#f0c8d2!important}
+ #sosDialog .sos-ahora{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;padding:16px;border-radius:18px;background:linear-gradient(135deg,#e5484d,#b4232a);border:0;color:#fff;font-size:17px;font-weight:800;letter-spacing:.02em;box-shadow:0 8px 24px #e5484d40;margin:2px 0 14px}#sosDialog .sos-ahora::before{content:'';width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 0 0 5px #ffffff40}
+ #sosDialog .sos-caida{background:#0c2230;border:1px solid #23394a;border-radius:16px;padding:14px}
+@@ -708,7 +708,7 @@ body.creating-route:has(.compact-preview) :is(#elevationPanel,.modes){visibility
+ .route-map-hint{font-size:12px;color:#bfdae4;margin:4px 0 8px}
+ </style></head><body><div id="app">
+ <header class="top"><div><strong>TRABAKUTIK <span style="color:#70eaff">GPS</span></strong><small id="title">Elige una ruta</small></div><a href="https://trabakutik.com/">← Volver a la web</a></header>
+-<div id="map" aria-label="Mapa de todas las rutas"><div id="mapRot"></div><div id="creadorDock"><label id="creadorActividad">Actividad <select id="alternativasActividad"><option value="bike">BTT / e-bike</option><option value="foot">Senderismo</option><option value="car">Coche</option></select></label><div id="creadorModo"><button type="button" id="modoManual" aria-pressed="true">Punto a punto</button><button type="button" id="modoDosPuntos" aria-pressed="false">Inicio y destino</button></div><section id="alternativasPanel" class="hidden"><header><b>Elige tu recorrido</b><button type="button" id="alternativasCerrar" aria-label="Volver a punto a punto">✕</button></header><p id="alternativasEstado" role="status"></p><div id="alternativasLista" class="hidden"></div></section></div><div class="tools"><button id="eye" title="Mostrar rutas de Trabakutik" aria-label="Mostrar rutas de Trabakutik" aria-pressed="false"><svg viewBox="0 0 24 24" width="23" height="23" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m3 7 9-4 9 4-9 4-9-4Z"/><path d="m3 12 9 4 9-4M3 17l9 4 9-4"/></svg></button><button id="locate" title="Mi posición" aria-label="Centrar en mi posición">⌖</button><button id="orient" type="button" aria-pressed="true" title="Orientar el mapa" aria-label="Orientar el mapa: rumbo arriba o norte arriba"><svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 L16 20 L12 17 L8 20 Z"/></svg></button><button id="audioMode" type="button" data-modo="voz" aria-label="Avisos por voz y pitidos" title="Cambiar avisos sonoros"><svg id="audioIcon" viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/></svg></button><button id="pantallaCruces" type="button" aria-pressed="false" hidden data-modo="andando" title="Bici o senderismo" aria-label="Modo: senderismo. La pantalla no se enciende en los cruces"><svg id="iconoModo" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></svg></button><button id="sos" type="button" aria-label="Compartir coordenadas SOS" hidden>SOS</button><button id="guardaMapa" type="button" title="Guardar el mapa de esta ruta para andar sin cobertura" aria-label="Guardar el mapa de esta ruta"><small>mapa</small><b>⤓</b></button></div><button type="button" id="avisoMal" class="aviso-mal hidden"></button><button type="button" id="avisoFalta" class="aviso-mal aviso-falta hidden">✋ Faltó aquí</button><div id="turnHint" class="turn-hint hidden" role="status" aria-live="polite"><div class="turn-fila"><span id="turnArrow" class="turn-arrow"></span><span class="turn-copy"><b id="turnDirection">Gira a la derecha</b><small id="turnAngle">Giro de 78&deg;</small><span class="turn-dist"><em id="turnDistance">50</em><i>m</i></span></span></div><div class="turn-fases"><i></i><i></i></div><div class="turn-rot"><span id="turnRot1">50 m</span><span>en el cruce</span></div></div><div class="info"><div class="info-top"><button id="mapTitle" class="route-title-link" type="button" disabled title="Ficha de la ruta">Mapa de rutas</button><button id="clearActiveRoute" class="clear-active hidden" type="button" aria-label="Quitar ruta activa del mapa" title="Quitar ruta activa">×</button><label class="basemap-control"><span>Mapa</span><select id="basemap" aria-label="Elegir fondo de mapa"><option value="osm">OSM</option><option value="ign">IGN</option><option value="pnoa">Sat.</option></select></label></div><div id="gpsState" data-estado="inactivo">GPS sin iniciar</div><span id="compass" class="compass hidden"><svg viewBox="0 0 40 40" width="40" height="40" aria-hidden="true"><circle cx="20" cy="20" r="18" fill="#07202dcc" stroke="#4ba7bc" stroke-width="1.4"/><text x="20" y="9.4" text-anchor="middle" font-size="7.5" font-weight="800" fill="#8fd3e4">N</text><text x="20" y="36" text-anchor="middle" font-size="6.5" fill="#54818f">S</text><text x="35.2" y="22.6" text-anchor="middle" font-size="6.5" fill="#54818f">E</text><text x="4.8" y="22.6" text-anchor="middle" font-size="6.5" fill="#54818f">O</text><g id="compassNeedle" transform="rotate(0 20 20)"><path d="M20 3.5 L26 25 L20 21 L14 25 Z" fill="#ff9c3b" stroke="#020617" stroke-width="1.2" stroke-linejoin="round"/><circle cx="20" cy="20" r="2.1" fill="#07202d" stroke="#8ef0ff" stroke-width="1.1"/></g></svg><b id="compassText">—</b></span><span id="routeProgress" class="route-progress hidden"></span><span id="distance">Ruta destacada en cian</span><span id="backgroundRouteLegend" class="hidden">Naranja continua · e-bike / Verde discontinua · senderismo / Dos colores · mixta</span><span id="ffProxBox" class="ff"><span class="ff-lab">Próx. cruce</span><b id="ffProx">—</b></span><span id="ffTrackBox" class="ff"><span class="ff-lab">Al track</span><b id="ffTrack">—</b></span><span id="ffAltBox" class="ff"><span class="ff-lab">Altitud</span><b id="ffAlt">—</b></span><button type="button" id="simBanda" class="sim-banda hidden">▶ SIMULANDO · toca para parar</button><span id="reverseWarn" class="reverse-warn hidden">&#8646; La est&aacute;s haciendo AL REV&Eacute;S &middot; los giros van corregidos</span></div><div id="plannerStatus" class="hidden" role="status" aria-live="polite"></div><span class="on-map" id="drawTip" hidden>Toca las líneas para marcar puntos azules</span><div id="mapCredit"></div><div id="plannerCredit"><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a> · cálculo FOSSGIS · <a href="https://www.openstreetmap.org/fixthemap" target="_blank" rel="noopener">Corregir mapa</a></div></div>
++<div id="map" aria-label="Mapa de todas las rutas"><div id="mapRot"></div><div id="creadorDock"><label id="creadorActividad">Actividad <select id="alternativasActividad"><option value="bike">BTT / e-bike</option><option value="foot">Senderismo</option><option value="car">Coche</option></select></label><div id="creadorModo"><button type="button" id="modoManual" aria-pressed="true">Punto a punto</button><button type="button" id="modoDosPuntos" aria-pressed="false">Inicio y destino</button></div><section id="alternativasPanel" class="hidden"><header><b>Elige tu recorrido</b><button type="button" id="alternativasCerrar" aria-label="Volver a punto a punto">✕</button></header><p id="alternativasEstado" role="status"></p><div id="alternativasLista" class="hidden"></div></section></div><div class="tools"><button id="eye" title="Mostrar rutas de Trabakutik" aria-label="Mostrar rutas de Trabakutik" aria-pressed="false"><svg viewBox="0 0 24 24" width="23" height="23" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m3 7 9-4 9 4-9 4-9-4Z"/><path d="m3 12 9 4 9-4M3 17l9 4 9-4"/></svg></button><button id="locate" title="Mi posición" aria-label="Centrar en mi posición">⌖</button><button id="orient" type="button" aria-pressed="true" title="Orientar el mapa" aria-label="Orientar el mapa: rumbo arriba o norte arriba"><svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 L16 20 L12 17 L8 20 Z"/></svg></button><button id="audioMode" type="button" data-modo="voz" aria-label="Avisos por voz y pitidos" title="Cambiar avisos sonoros"><svg id="audioIcon" viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/></svg></button><button id="sos" type="button" aria-label="Compartir coordenadas SOS" hidden>SOS</button><button id="guardaMapa" type="button" title="Guardar el mapa de esta ruta para andar sin cobertura" aria-label="Guardar el mapa de esta ruta"><small>mapa</small><b>⤓</b></button></div><button type="button" id="avisoMal" class="aviso-mal hidden"></button><button type="button" id="avisoFalta" class="aviso-mal aviso-falta hidden">✋ Faltó aquí</button><div id="turnHint" class="turn-hint hidden" role="status" aria-live="polite"><div class="turn-fila"><span id="turnArrow" class="turn-arrow"></span><span class="turn-copy"><b id="turnDirection">Gira a la derecha</b><small id="turnAngle">Giro de 78&deg;</small><span class="turn-dist"><em id="turnDistance">50</em><i>m</i></span></span></div><div class="turn-fases"><i></i><i></i></div><div class="turn-rot"><span id="turnRot1">50 m</span><span>en el cruce</span></div></div><div class="info"><div class="info-top"><button id="mapTitle" class="route-title-link" type="button" disabled title="Ficha de la ruta">Mapa de rutas</button><button id="clearActiveRoute" class="clear-active hidden" type="button" aria-label="Quitar ruta activa del mapa" title="Quitar ruta activa">×</button><label class="basemap-control"><span>Mapa</span><select id="basemap" aria-label="Elegir fondo de mapa"><option value="osm">OSM</option><option value="ign">IGN</option><option value="pnoa">Sat.</option></select></label></div><div id="gpsState" data-estado="inactivo">GPS sin iniciar</div><span id="compass" class="compass hidden"><svg viewBox="0 0 40 40" width="40" height="40" aria-hidden="true"><circle cx="20" cy="20" r="18" fill="#07202dcc" stroke="#4ba7bc" stroke-width="1.4"/><text x="20" y="9.4" text-anchor="middle" font-size="7.5" font-weight="800" fill="#8fd3e4">N</text><text x="20" y="36" text-anchor="middle" font-size="6.5" fill="#54818f">S</text><text x="35.2" y="22.6" text-anchor="middle" font-size="6.5" fill="#54818f">E</text><text x="4.8" y="22.6" text-anchor="middle" font-size="6.5" fill="#54818f">O</text><g id="compassNeedle" transform="rotate(0 20 20)"><path d="M20 3.5 L26 25 L20 21 L14 25 Z" fill="#ff9c3b" stroke="#020617" stroke-width="1.2" stroke-linejoin="round"/><circle cx="20" cy="20" r="2.1" fill="#07202d" stroke="#8ef0ff" stroke-width="1.1"/></g></svg><b id="compassText">—</b></span><span id="routeProgress" class="route-progress hidden"></span><span id="distance">Ruta destacada en cian</span><span id="backgroundRouteLegend" class="hidden">Naranja continua · e-bike / Verde discontinua · senderismo / Dos colores · mixta</span><span id="ffProxBox" class="ff"><span class="ff-lab">Próx. cruce</span><b id="ffProx">—</b></span><span id="ffTrackBox" class="ff"><span class="ff-lab">Al track</span><b id="ffTrack">—</b></span><span id="ffAltBox" class="ff"><span class="ff-lab">Altitud</span><b id="ffAlt">—</b></span><button type="button" id="simBanda" class="sim-banda hidden">▶ SIMULANDO · toca para parar</button><span id="reverseWarn" class="reverse-warn hidden">&#8646; La est&aacute;s haciendo AL REV&Eacute;S &middot; los giros van corregidos</span></div><div id="plannerStatus" class="hidden" role="status" aria-live="polite"></div><span class="on-map" id="drawTip" hidden>Toca las líneas para marcar puntos azules</span><div id="mapCredit"></div><div id="plannerCredit"><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a> · cálculo FOSSGIS · <a href="https://www.openstreetmap.org/fixthemap" target="_blank" rel="noopener">Corregir mapa</a></div></div>
+ <section id="tripBox" class="hidden" aria-label="Lo que llevas" aria-live="off"><div class="trip-nombre" id="tripRuta"></div><div class="trip-tres"><div class="trip-col"><h3>Distancia</h3><div class="trip-g"><span id="tripHecho"></span><small id="tripHechoU">km</small></div><div class="trip-p"><span id="tripQuedaTxt">quedan </span><b id="tripQueda"></b></div><div class="trip-pista"><i id="tripBarra"></i></div></div><div class="trip-col"><h3>Desnivel</h3><div class="trip-g" id="tripDesnivel" role="text"><span class="par"><span class="sube" aria-hidden="true">▲</span><span id="tripSubido"></span></span> <span class="par"><span class="baja" aria-hidden="true">▼</span><span id="tripBajado"></span></span></div><div class="trip-p">falta <b id="tripFalta"></b></div></div><div class="trip-col"><h3>Tiempo</h3><div class="trip-g" id="tripTiempo">—</div><div class="trip-p">en marcha<b id="tripAltitud" class="hidden"></b></div></div></div><div class="trip-perfil-caja"><svg id="tripPerfil" viewBox="0 0 300 48" preserveAspectRatio="none" aria-hidden="true"><defs><clipPath id="tripHechoClip"><path id="tripHechoRect" d=""/></clipPath></defs><path id="tripPerfilArea" fill="#4fd8f0" fill-opacity=".14"/><path id="tripPerfilHecho" fill="#4fd8f0" fill-opacity=".38" clip-path="url(#tripHechoClip)"/><path id="tripPerfilLinea" fill="none" stroke="#4fd8f0" stroke-width="2" vector-effect="non-scaling-stroke"/><circle id="tripPerfilPunto" r="0" fill="#1e7bf2" stroke="#fff" stroke-width="2" vector-effect="non-scaling-stroke"/></svg><div id="tripPerfilMarcas" aria-hidden="true"></div></div><div class="trip-botones"><button type="button" id="tripPausa" class="trip-proxy">❙❙ Pausa</button><button type="button" id="tripSigue" class="trip-proxy go hidden">▶ Seguir</button><button type="button" id="tripParar" class="trip-proxy red">■ Parar</button><button type="button" id="tripBloquea" class="trip-bloquea" aria-label="Bloquear la pantalla" title="Bloquear la pantalla: los toques no hacen nada hasta desbloquear">🔒</button><button id="despeja" class="despeja hidden" type="button" title="Mostrar u ocultar los mandos" aria-expanded="false">⌄ Ocultar</button></div></section>
+ <div id="candado" class="hidden" role="dialog" aria-modal="true" aria-label="Pantalla bloqueada"><button type="button" id="candadoQuita"><span aria-hidden="true">🔒</span><span>Bloqueada · mantén pulsado para desbloquear</span></button></div>
+ <section id="elevationPanel" class="elevation-panel hidden" aria-label="Perfil de elevación">
+diff --git a/tests/giros_limite.py b/tests/giros_limite.py
+index d9a06ab..72c9a17 100644
+--- a/tests/giros_limite.py
++++ b/tests/giros_limite.py
+@@ -58,11 +58,6 @@ public class GirosLimiteTest {
+  Map<Integer,ConfirmaRamal.Cruce> ramalesIda=new HashMap<>(),ramalesVuelta=new HashMap<>();
+  void cargaRamales(JSONObject p,int at,ArrayList<double[]> lista){}
+  Map<double[],String> hitosDeGiro=new HashMap<>();
+- Map<double[],int[]> ramalesDeGiro=new HashMap<>();
+- Map<double[],Integer> gradosDeGiro=new HashMap<>();
+- void abrePantallaGiro(int a,int b,int c,int d,int[] e,int f,int g){}
+- boolean pantallaCruces(){return false;}
+- void alargaPantallaGiro(){}
+ ''' + linea(' static final int GIROS_MAX=') + '\n' + metodo(' static String girosQueCaben(') + metodo(' void loadTurns()') + metodo(' void leeGiros(') + linea(' static final String[] ORDINALES=') + '\n' + metodo(' String fraseGiro(int lado,int tipo,String fase,double ahead,int salida)') + metodo(' String fraseGiro(int lado,int tipo,String fase,double ahead){') + r'''
+  static void require(boolean b,String s){if(!b)throw new AssertionError(s);}
+  static String lista(int n,int desde){StringBuilder b=new StringBuilder("[");
+diff --git a/tests/navigation.test.cjs b/tests/navigation.test.cjs
+index 0a0996e..bf810ce 100644
+--- a/tests/navigation.test.cjs
++++ b/tests/navigation.test.cjs
+@@ -1876,60 +1876,3 @@ test('El aviso bueno de salida no se borra en la siguiente posición (23 nov 202
+  assert(n9.includes("if(alerted)notice(textoFuera||'Fuera del recorrido"),
+    'onFix tiene que repetir el aviso que decidió updateOffRoute');
+ });
+-test('La pantalla en los cruces: apagada de serie, solo dentro de la aplicación (23 nov 2026)',()=>{
+- // Lo pidió el autor para la bici, con el móvil en el soporte: «que de un
+- // vistazo pueda ver dónde tengo que ir». Andando no la quiere: «no quisiera
+- // en una ruta de senderismo tener que consumir batería».
+- const guardado={};const nodo=()=>({hidden:true,attrs:{},dataset:{},innerHTML:'',
+-   setAttribute(k,v){this.attrs[k]=v},hasAttribute(){return false}});
+- const b=nodo(),icono=nodo();let dicho='',mandado=null;
+- const c=pieza('07-servicio.js',{$:id=>id==='pantallaCruces'?b:id==='iconoModo'?icono:nodo(),notice:t=>{dicho=t},
+-  localStorage:{getItem:k=>guardado[k]??null,setItem:(k,v)=>{guardado[k]=v}},
+-  window:{TrabakutikAndroid:{setPantallaCruces(v){mandado=v},getPantallaCruces:()=>false,
+-   puedePantallaCruces:()=>true}}});
+- // De serie, apagada, y el botón se ve porque hay aplicación.
+- c.pintaPantallaCruces();
+- assert.equal(b.hidden,false,'dentro de la aplicación el botón se ve');
+- assert.equal(b.attrs['aria-pressed'],'false','y nace apagado');
+- assert.equal(b.dataset.modo,'andando','de serie, senderista');
+- assert(icono.innerHTML.includes('M12 8.5'),'con el dibujo del caminante');
+- assert.match(b.attrs['aria-label'],/senderismo/);
+- // Al encenderla se guarda, se le dice al servicio y se avisa.
+- c.conmutaPantallaCruces();
+- assert.equal(mandado,true,'el servicio se entera');
+- assert.equal(guardado['trabakutik-pantalla-cruces'],'1','y se recuerda');
+- assert.equal(b.attrs['aria-pressed'],'true');
+- assert.equal(b.dataset.modo,'bici','pasa a bici');
+- assert(icono.innerHTML.includes('circle cx="5.5"'),'y al dibujo de la bici');
+- assert.match(b.attrs['aria-label'],/bici/i);
+- assert.match(dicho,/Bici · la pantalla se enciende/);
+- // Y al apagarla, lo contrario.
+- c.conmutaPantallaCruces();
+- assert.equal(mandado,false);
+- assert.equal(guardado['trabakutik-pantalla-cruces'],'0');
+- assert.match(dicho,/Senderismo · la pantalla no se enciende/);
+- assert.equal(b.dataset.modo,'andando','y vuelve a senderista');
+-});
+-test('Si Android no deja encender la pantalla, se dice en vez de callar',()=>{
+- // Desde Android 14 ese permiso está reservado a llamadas y alarmas. Callar
+- // sería peor: el autor creería que está encendido y en el monte no pasaría
+- // nada.
+- const nodo=()=>({hidden:true,attrs:{},dataset:{},innerHTML:'',setAttribute(k,v){this.attrs[k]=v},
+-   classList:{add(){},remove(){},toggle(){}},style:{setProperty(){},removeProperty(){}}});
+- const b=nodo();let dicho='',ajustes=0;
+- const c=pieza('07-servicio.js',{$:id=>id==='pantallaCruces'?b:nodo(),
+-  notice:t=>{dicho=t},localStorage:{getItem:()=>null,setItem(){}},
+-  window:{TrabakutikAndroid:{setPantallaCruces(){},getPantallaCruces:()=>false,
+-   puedePantallaCruces:()=>false,abreAjustesPantalla(){ajustes++}}}});
+- c.conmutaPantallaCruces();
+- assert.equal(ajustes,1,'se le lleva a la pantalla de ese permiso, no a buscarlo');
+- assert.match(dicho,/dáselo y vuelve/);
+- // Con una APK que no sepa abrirla, se dice dónde está.
+- const b2=nodo();let dicho2='';
+- const c2=pieza('07-servicio.js',{$:id=>id==='pantallaCruces'?b2:nodo(),
+-  notice:t=>{dicho2=t},localStorage:{getItem:()=>null,setItem(){}},
+-  window:{TrabakutikAndroid:{setPantallaCruces(){},getPantallaCruces:()=>false,
+-   puedePantallaCruces:()=>false}}});
+- c2.conmutaPantallaCruces();
+- assert.match(dicho2,/Ajustes → Aplicaciones/);
+-});
+diff --git a/tests/regression_tracking.py b/tests/regression_tracking.py
+index d046c59..a45c09c 100644
+--- a/tests/regression_tracking.py
++++ b/tests/regression_tracking.py
+@@ -72,12 +72,6 @@ public class TrackingRegression {
+  File dirBase;File getFilesDir(){return dirBase;}
+  File file;static String GRABANDO;String errorGrabacion="";long lastRecordedTime;double lastRecordedLat,lastRecordedLon;int points;boolean recording;
+  boolean navigating=true,offRoute=false;ArrayList<double[]> route=new ArrayList<>(),turns=new ArrayList<>(),turnsReves=new ArrayList<>();boolean hayReves=false;Map<double[],String> hitosDeGiro=new HashMap<>();
+- Map<double[],int[]> ramalesDeGiro=new HashMap<>();
+- Map<double[],Integer> gradosDeGiro=new HashMap<>();
+- static int gradosDelGiro(int tipo){return tipo==5?90:tipo==0?70:90;}
+- void abrePantallaGiro(int a,int b,int c,int d,int[] e,int f,int g){}
+- boolean pantallaCruces(){return false;}
+- void alargaPantallaGiro(){}
+  double inicioCurva=Double.NaN,maximoCurva=Double.NaN;long ultimoFixCurva=0;
+  HashSet<String> warnedTurns=new HashSet<>();String upcomingTurn="";int sentido=1;double velocidadSuave=1.2;int beeps=0;
+  double avisoLargo(){return 50;}double avisoCorto(){return 10;}double avisoVoz(){return 35;}double avisoYa(){return 4;}double avisoCurva(){return 20;}
