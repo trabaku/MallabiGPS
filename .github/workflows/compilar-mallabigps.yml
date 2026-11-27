@@ -114,27 +114,3 @@ jobs:
       - name: Limpiar clave
         if: always()
         run: rm -f android/firma/mallabi.p12
-  publicar-pruebas:
-    if: github.repository == 'trabaku/MallabiGPS' && github.ref == 'refs/heads/main'
-    needs: android
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: MallabiGPS-1.0.9-APK-pruebas
-          path: dist
-      - name: Publicar descarga directa de la APK
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          cd dist
-          sha256sum -c SHA256.txt
-          tag="v1.0.9-pruebas-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          gh release create "$tag" MallabiGPS-1.0.9-pruebas.apk SHA256.txt \
-            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --prerelease --latest=false --title "MallabiGPS 1.0.9 · APK de pruebas" \
-            --notes "Instalación independiente para probar los perfiles BTT y Senderismo. APK con firma Android de pruebas."
