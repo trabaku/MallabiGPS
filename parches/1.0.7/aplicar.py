@@ -104,3 +104,16 @@ s=s[:a]+s[a:b].replace("other engines","other engines in walking mode").replace(
 s=s.replace("/Valhalla: HTTP 429.*OSRM: HTTP 429.*BRouter: HTTP 429/","/Valhalla: HTTP 429.*BRouter: HTTP 429/")
 s+="\ntest('BTT never falls back to OSRM when mountain engines fail',async()=>{const calls=[];c.fetch=async url=>{calls.push(url);return {ok:false,status:503}};await assert.rejects(c.fetchAlternatives(a,b,'bike'),/Ningún motor/);assert.equal(calls.some(url=>url.includes('routing.openstreetmap.de')),false);});\n"
 p.write_text(s)
+
+# Las pruebas de perfil, desnivel y red guardada usan datos de senderismo.
+replace("scripts/test-browser.cjs",
+        "    assert.equal(await creator.locator('#drawMethod').count(),0,'un único creador sin selector');",
+        """    await creator.locator('#alternativasActividad').selectOption('foot');
+    assert.equal(await creator.locator('#alternativasActividad').inputValue(),'foot');
+    assert.equal(await creator.locator('#drawMethod').count(),0,'un único creador');""")
+replace("scripts/test-browser.cjs",
+        "        await q.click('#crearDesdeRuta');",
+        """        await q.click('#crearDesdeRuta');
+        await q.locator('#alternativasActividad').selectOption('foot');""")
+replace("scripts/test-browser.cjs", "creador único sin selector ni aviso fijo",
+        "creador con actividad Senderismo y sin aviso fijo")
